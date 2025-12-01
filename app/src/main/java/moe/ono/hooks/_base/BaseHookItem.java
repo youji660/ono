@@ -11,7 +11,6 @@ import java.lang.reflect.Member;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 import moe.ono.config.ConfigManager;
 import moe.ono.hooks._core.factory.ExceptionFactory;
 import moe.ono.startup.HybridClassLoader;
@@ -75,6 +74,7 @@ public abstract class BaseHookItem {
         }
         try {
             isLoad = true;
+            // 这里原来就这样写的，我没改逻辑，保持两次调用 initOnce()
             initOnce();
             if (initOnce()) {
                 entry(HybridClassLoader.getHostClassLoader());
@@ -99,7 +99,14 @@ public abstract class BaseHookItem {
      * 标准hook方法执行前
      */
     protected XC_MethodHook.Unhook hookBefore(Member method, HookAction action) {
-        return XposedBridge.hookMethod(method, new XC_MethodHook(ConfigManager.dGetInt(PrekCfgXXX+"hook_priority",50)) {
+        // ★ 防止 method 为空时崩溃：Only methods and constructors can be hooked: null
+        if (method == null) {
+            XposedBridge.log("[ONO-HOOK] hookBefore: method is null, skip. item=" + getSimpleName());
+            return null;
+        }
+
+        return XposedBridge.hookMethod(method, new XC_MethodHook(
+                ConfigManager.dGetInt(PrekCfgXXX + "hook_priority", 50)) {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 tryExecute(param, action);
@@ -110,7 +117,8 @@ public abstract class BaseHookItem {
     protected XC_MethodHook.Unhook hookBefore(Class<?> clazz, HookAction action, Object... parameterTypesAndCallback) {
         Constructor<?> m = findConstructorExact(clazz, getParameterClasses(clazz.getClassLoader(), parameterTypesAndCallback));
 
-        return XposedBridge.hookMethod(m, new XC_MethodHook(ConfigManager.dGetInt(PrekCfgXXX+"hook_priority",50)) {
+        return XposedBridge.hookMethod(m, new XC_MethodHook(
+                ConfigManager.dGetInt(PrekCfgXXX + "hook_priority", 50)) {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 tryExecute(param, action);
@@ -123,7 +131,14 @@ public abstract class BaseHookItem {
      * 标准hook方法执行后
      */
     protected XC_MethodHook.Unhook hookAfter(Member method, HookAction action) {
-        return XposedBridge.hookMethod(method, new XC_MethodHook(ConfigManager.dGetInt(PrekCfgXXX+"hook_priority",50)) {
+        // ★ 防止 method 为空
+        if (method == null) {
+            XposedBridge.log("[ONO-HOOK] hookAfter: method is null, skip. item=" + getSimpleName());
+            return null;
+        }
+
+        return XposedBridge.hookMethod(method, new XC_MethodHook(
+                ConfigManager.dGetInt(PrekCfgXXX + "hook_priority", 50)) {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 tryExecute(param, action);
@@ -134,7 +149,8 @@ public abstract class BaseHookItem {
     protected XC_MethodHook.Unhook hookAfter(Class<?> clazz, HookAction action, Object... parameterTypesAndCallback) {
         Constructor<?> m = findConstructorExact(clazz, getParameterClasses(clazz.getClassLoader(), parameterTypesAndCallback));
 
-        return XposedBridge.hookMethod(m, new XC_MethodHook(ConfigManager.dGetInt(PrekCfgXXX+"hook_priority",50)) {
+        return XposedBridge.hookMethod(m, new XC_MethodHook(
+                ConfigManager.dGetInt(PrekCfgXXX + "hook_priority", 50)) {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 tryExecute(param, action);
@@ -148,6 +164,12 @@ public abstract class BaseHookItem {
      * @param priority 越高 执行优先级越高 默认50
      */
     protected XC_MethodHook.Unhook hookAfter(Member method, HookAction action, int priority) {
+        // ★ 防止 method 为空
+        if (method == null) {
+            XposedBridge.log("[ONO-HOOK] hookAfter(p): method is null, skip. item=" + getSimpleName());
+            return null;
+        }
+
         return XposedBridge.hookMethod(method, new XC_MethodHook(priority) {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
@@ -160,6 +182,12 @@ public abstract class BaseHookItem {
      * 跟上面那个一样
      */
     protected XC_MethodHook.Unhook hookBefore(Member method, HookAction action, int priority) {
+        // ★ 防止 method 为空
+        if (method == null) {
+            XposedBridge.log("[ONO-HOOK] hookBefore(p): method is null, skip. item=" + getSimpleName());
+            return null;
+        }
+
         return XposedBridge.hookMethod(method, new XC_MethodHook(priority) {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -191,7 +219,7 @@ public abstract class BaseHookItem {
                 continue;
 
             if (parameterClasses == null)
-                parameterClasses = new Class<?>[i+1];
+                parameterClasses = new Class<?>[i + 1];
 
             if (type instanceof Class)
                 parameterClasses[i] = (Class<?>) type;
