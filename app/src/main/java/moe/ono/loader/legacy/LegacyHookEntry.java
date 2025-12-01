@@ -10,7 +10,8 @@ import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import moe.ono.common.ModuleLoader;
-import moe.ono.RefUtil
+import moe.ono.RefUtil;   // ✅ 注意这行，有分号
+
 /**
  * Entry point for started Xposed API 51-99.
  * <p>
@@ -34,19 +35,40 @@ public class LegacyHookEntry implements IXposedHookLoadPackage, IXposedHookZygot
         sLoadPackageParam = lpparam;
         // check LSPosed dex-obfuscation
         Class<?> kXposedBridge = XposedBridge.class;
+
         switch (lpparam.packageName) {
             case PACKAGE_NAME_SELF: {
                 Xp51HookStatusInit.init(lpparam.classLoader);
                 break;
             }
-            case PACKAGE_NAME_QQ:
+            case PACKAGE_NAME_QQ: {
                 if (sInitZygoteStartupParam == null) {
                     throw new IllegalStateException("handleLoadPackage: sInitZygoteStartupParam is null");
                 }
                 sCurrentPackageName = lpparam.packageName;
-                ModuleLoader.initialize(lpparam.appInfo.dataDir, lpparam.classLoader,
-                        Xp51HookImpl.INSTANCE, Xp51HookImpl.INSTANCE, getModulePath(), true);
+
+                // ✅ 这里用 RefUtil 打印 QQNT 消息类结构（只在 QQ 进程里执行）
+                try {
+                    XposedBridge.log("LegacyHookEntry: QQ loaded, start debug...");
+                    RefUtil.logClassInfo(
+                            "com.tencent.qqnt.kernel.nativeinterface.MsgRecord",
+                            lpparam.classLoader
+                    );
+                } catch (Throwable t) {
+                    XposedBridge.log("LegacyHookEntry: logClassInfo error: " + t);
+                }
+
+                // 原来的初始化逻辑保持不动
+                ModuleLoader.initialize(
+                        lpparam.appInfo.dataDir,
+                        lpparam.classLoader,
+                        Xp51HookImpl.INSTANCE,
+                        Xp51HookImpl.INSTANCE,
+                        getModulePath(),
+                        true
+                );
                 break;
+            }
             default:
                 break;
         }
