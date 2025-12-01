@@ -39,7 +39,8 @@ import moe.ono.util.AppRuntimeHelper;
 import moe.ono.util.Initiator;
 import moe.ono.util.Logger;
 import moe.ono.util.SyncUtils;
-
+import moe.ono.RefUtil;
+import de.robv.android.xposed.XposedBridge;
 public class QLauncher {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     public void init(@NonNull ClassLoader cl, @NonNull ApplicationInfo ai, @NonNull String modulePath, Context context) {
