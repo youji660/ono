@@ -23,13 +23,14 @@ on:
       - '.github/**'
       - '.github/workflows/**'
       - '.idea/**'
-  workflow_dispatch:
+  workflow_dispatch: {}   # ✅ 允许你手动点“运行工作流”
 
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    if: ${{ !startsWith(github.event.head_commit.message, '[skip ci]') && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}
+    if: ${{ !startsWith(github.event.head_commit.message, '[skip ci]') && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,6 +47,25 @@ jobs:
 
       - name: Grant execute permission
         run: chmod +x gradlew
+
+      # =====================================================
+      # ✅ 手动运行(workflow_dispatch)时：只打一份 Debug APK
+      # =====================================================
+      - name: Build debug APK (manual)
+        if: github.event_name == 'workflow_dispatch'
+        run: ./gradlew :app:assembleDebug --warning-mode all --stacktrace
+
+      - name: Upload debug APK (manual)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ono-debug-apk
+          path: app/build/outputs/apk/debug/**/*.apk
+          if-no-files-found: error
+
+      # =====================================================
+      # ✅ 以下是原来作者的 Release 流程（push / PR 才会跑）
+      # =====================================================
 
       - name: Decode keystore (push -> main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -113,7 +133,6 @@ jobs:
             echo "No APK found!" >&2
             exit 1
           fi
-          # 取第一个（如果有多个，你也可以用循环逐个发）
           echo "apk_path=${files[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Send APK via Telegram API
