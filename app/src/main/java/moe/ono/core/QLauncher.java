@@ -39,27 +39,43 @@ import moe.ono.util.AppRuntimeHelper;
 import moe.ono.util.Initiator;
 import moe.ono.util.Logger;
 import moe.ono.util.SyncUtils;
+
+// ★★ 新增：引入 RefUtil 和 XposedBridge
 import moe.ono.RefUtil;
 import de.robv.android.xposed.XposedBridge;
+
 public class QLauncher {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     public void init(@NonNull ClassLoader cl, @NonNull ApplicationInfo ai, @NonNull String modulePath, Context context) {
         Initiator.init(context.getClassLoader());
 
+        // ★★ 新增：这里插入调试代码，打印 MsgRecord 类结构
+        try {
+            XposedBridge.log("[ONO-DEBUG] QLauncher.init() enter, processType=" + SyncUtils.getProcessType());
+
+            // 这行是关键：让 RefUtil 把 com.tencent.qqnt.kernel.nativeinterface.MsgRecord 的
+            // 字段、方法都打印到 LSPosed 日志里
+            RefUtil.logClassInfo(
+                    "com.tencent.qqnt.kernel.nativeinterface.MsgRecord",
+                    cl  // 使用当前 QQ 进程的 ClassLoader
+            );
+        } catch (Throwable t) {
+            XposedBridge.log("[ONO-DEBUG] RefUtil.logClassInfo error: " + t);
+        }
+        // ★★ 新增结束
+
         HookItemLoader hookItemLoader = new HookItemLoader();
         hookItemLoader.loadHookItem(SyncUtils.getProcessType());
 
-
-
         XposedHelpers.findAndHookMethod(CLAZZ_BASE_APPLICATION_IMPL, cl,
-            "onCreate",
-            new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    Application hostApp = (Application) param.thisObject;
-                    StartupInfo.setHostApp(hostApp);
-                }
-            });
+                "onCreate",
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        Application hostApp = (Application) param.thisObject;
+                        StartupInfo.setHostApp(hostApp);
+                    }
+                });
 
         /* beforeDoOnCreate */
         XposedHelpers.findAndHookMethod(CLAZZ_ACTIVITY_SPLASH, cl, "beforeDoOnCreate", new XC_MethodHook() {
@@ -68,15 +84,16 @@ public class QLauncher {
                 CacheConfig.setSplashActivity((Activity) param.thisObject);
 
                 String ver = PlatformUtils.INSTANCE.getQQVersion(context);
-                if (!Objects.equals(ver, TargetManager.getLastQQVersion())){
+                if (!Objects.equals(ver, TargetManager.getLastQQVersion())) {
                     TargetManager.setIsNeedFindTarget(true);
                 }
-                reportVisitor(AppRuntimeHelper.getAccount(), "QQVersion-"+ver);
-                Logger.i("QQVersion-"+ver);
+                reportVisitor(AppRuntimeHelper.getAccount(), "QQVersion-" + ver);
+                Logger.i("QQVersion-" + ver);
 
                 TargetManager.setLastQQVersion(ver);
                 super.beforeHookedMethod(param);
             }
+
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 post(() -> {
@@ -98,23 +115,23 @@ public class QLauncher {
                 injectLifecycleForProcess(context);
                 super.beforeHookedMethod(param);
             }
+
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 Activity activity = (Activity) param.thisObject;
                 StartupInfo.setSplashActivity(activity);
                 addRecreateCount();
 
-                if (TargetManager.isNeedFindTarget()){
+                if (TargetManager.isNeedFindTarget()) {
                     activity.setTheme(R.style.Theme_Ono);
-                    if (getRecreateCount() == 1){
+                    if (getRecreateCount() == 1) {
                         activity.recreate();
                         return;
                     }
                 }
 
-
                 postDelayed(0, () -> {
-                    if (!TargetManager.isNeedFindTarget()){
+                    if (!TargetManager.isNeedFindTarget()) {
                         return;
                     }
                     new XPopup.Builder(activity)
@@ -127,12 +144,7 @@ public class QLauncher {
                 super.afterHookedMethod(param);
             }
         });
-
-
-
-
     }
-
 
     public static void injectLifecycleForProcess(Context ctx) {
         if (SyncUtils.isMainProcess()) {
@@ -147,4 +159,3 @@ public class QLauncher {
         }
     }
 }
-
