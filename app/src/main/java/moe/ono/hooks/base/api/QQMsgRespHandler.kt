@@ -61,7 +61,6 @@ class QQMsgRespHandler : ApiHookItem() {
                 .get()
         ) { param ->
 
-            // 防崩溃：args[1]/字段都可能不符合预期
             val pair = param.args.getOrNull(1) ?: return@hookBefore
 
             val serviceMsg: ToServiceMsg = runCatching {
@@ -79,7 +78,6 @@ class QQMsgRespHandler : ApiHookItem() {
                 data.fromBytes(getUnpPackage(fromServiceMsg.wupBuffer))
                 val json = data.toJSON()
 
-                // handlers 分发（保留）
                 handlers.forEach { handler ->
                     if (handler.cmd == cmd) {
                         handler.onHandle(json, serviceMsg, fromServiceMsg)
@@ -96,7 +94,7 @@ class QQMsgRespHandler : ApiHookItem() {
             }
 
             // ==========================================================
-            // 拍一拍专用捕获：独立抓取（不 return，不影响原逻辑）
+            // 拍一拍专用捕获（新增，不影响原逻辑）
             // ==========================================================
             runCatching {
                 if (PatPat.detect(cmd, obj)) {
@@ -107,7 +105,7 @@ class QQMsgRespHandler : ApiHookItem() {
             }
 
             // ==========================================================
-            // 你原来的 when(cmd) 逻辑（保留）
+            // 你原来的逻辑（保留）
             // ==========================================================
             when (cmd) {
                 "OidbSvcTrpcTcp.0x9067_202" -> {
@@ -276,8 +274,7 @@ class QQMsgRespHandler : ApiHookItem() {
 
                     if (MessageEncryptor.decryptMsg) {
                         MessageEncryptor.decryptMsg = false
-                        val key =
-                            "${MessageEncryptor.peerUid}:${MessageEncryptor.msgSeq}:${MessageEncryptor.senderUin}"
+                        val key = "${MessageEncryptor.peerUid}:${MessageEncryptor.msgSeq}:${MessageEncryptor.senderUin}"
                         MessageEncryptor.peerUid = ""
                         MessageEncryptor.senderUin = ""
                         MessageEncryptor.msgSeq = ""
@@ -453,11 +450,9 @@ class QQMsgRespHandler : ApiHookItem() {
     }
 
     companion object {
-
-        // ------------------ 原 handlers ------------------
         val handlers = arrayListOf<IRespHandler>()
 
-        // ------------------ 拍一拍专用缓存 ------------------
+        // =============== 拍一拍缓存（对外可见） ===============
         object PatPatCache {
             @Volatile var lastCmd: String? = null
             @Volatile var lastText: String? = null
@@ -465,23 +460,15 @@ class QQMsgRespHandler : ApiHookItem() {
             @Volatile var lastTs: Long = 0L
         }
 
-        /**
-         * 拍一拍识别/提取：
-         *  - 新版：优先命中灰字结构 25.1.28.2
-         *  - 旧版：兼容 Elem 49 (PatsElem) 邻域扫 Text/Tips
-         */
         object PatPat {
 
             fun detect(cmd: String, obj: JSONObject): Boolean {
-                // 1) 新版灰字结构：25 -> 1 -> 28
                 val grayObj = obj.optJSONObject("25")
                     ?.optJSONObject("1")
                     ?.optJSONObject("28")
                 if (grayObj != null) return true
 
-                // 2) 旧版：数组里出现 pat_elem(49)
                 if (deepHasKey(obj, "49")) return true
-
                 return false
             }
 
@@ -495,9 +482,6 @@ class QQMsgRespHandler : ApiHookItem() {
             }
 
             private fun extractText(obj: JSONObject): String? {
-                // ----------------------------
-                // A. 新版灰字：25.1.28.2
-                // ----------------------------
                 obj.optJSONObject("25")
                     ?.optJSONObject("1")
                     ?.optJSONObject("28")
@@ -506,28 +490,21 @@ class QQMsgRespHandler : ApiHookItem() {
                     ?.takeIf { it.isNotEmpty() && it != "null" }
                     ?.let { return it }
 
-                // ----------------------------
-                // B. 旧版：Elem 49 PatsElem，邻域找 Text/Tips
-                // ----------------------------
                 val hits = ArrayList<Pair<JSONArray, Int>>(4)
                 findPatInArrays(obj, hits)
                 if (hits.isEmpty()) return null
 
                 for ((arr, idx) in hits) {
-                    // 自己先找
                     pickTextFromElem(arr.optJSONObject(idx))?.let { return it }
-
-                    // 前后扫一小段：灰条文本常在附近
                     for (d in 1..4) {
                         pickTextFromElem(arr.optJSONObject(idx - d))?.let { return it }
                         pickTextFromElem(arr.optJSONObject(idx + d))?.let { return it }
                     }
 
-                    // 没文本：至少输出 type/count
                     val patObj = arr.optJSONObject(idx)?.optJSONObject("49")
                     if (patObj != null) {
-                        val t = patObj.optInt("1", -1) // uint32_pat_type
-                        val c = patObj.optInt("2", -1) // uint32_pat_count
+                        val t = patObj.optInt("1", -1)
+                        val c = patObj.optInt("2", -1)
                         return "拍一拍(type=$t,count=$c)"
                     }
                 }
@@ -559,9 +536,7 @@ class QQMsgRespHandler : ApiHookItem() {
                 when (any) {
                     is JSONObject -> {
                         val it = any.keys()
-                        while (it.hasNext()) {
-                            findPatInArrays(any.opt(it.next()), out)
-                        }
+                        while (it.hasNext()) findPatInArrays(any.opt(it.next()), out)
                     }
                     is JSONArray -> {
                         for (i in 0 until any.length()) {
@@ -576,14 +551,12 @@ class QQMsgRespHandler : ApiHookItem() {
             private fun pickTextFromElem(elem: JSONObject?): String? {
                 if (elem == null) return null
 
-                // Text.str => Elem(1).Text(1)
                 elem.optJSONObject("1")
                     ?.optString("1")
                     ?.trim()
                     ?.takeIf { it.isNotEmpty() && it != "null" }
                     ?.let { return it }
 
-                // TipsInfo.text => Elem(20).TipsInfo(1)
                 elem.optJSONObject("20")
                     ?.optString("1")
                     ?.trim()
@@ -594,7 +567,6 @@ class QQMsgRespHandler : ApiHookItem() {
             }
         }
 
-        // ------------------ 原 compressData 保留 ------------------
         fun compressData(data: String): ByteArray {
             val inputBytes = data.toByteArray(Charsets.UTF_8)
             val deflater = Deflater(Deflater.DEFAULT_COMPRESSION, false)
@@ -617,7 +589,6 @@ class QQMsgRespHandler : ApiHookItem() {
         }
     }
 
-    // ------------------ 原 appendToContentArray 保留 ------------------
     fun appendToContentArray(original: JSONObject, newContent: Any) {
         val contentArray = original
             .optJSONObject("1")
@@ -630,11 +601,7 @@ class QQMsgRespHandler : ApiHookItem() {
 
         when (newContent) {
             is JSONObject -> contentArray.put(newContent)
-            is JSONArray -> {
-                for (i in 0 until newContent.length()) {
-                    contentArray.put(newContent.getJSONObject(i))
-                }
-            }
+            is JSONArray -> for (i in 0 until newContent.length()) contentArray.put(newContent.getJSONObject(i))
             else -> throw IllegalArgumentException("Unsupported type for content")
         }
     }
