@@ -3,18 +3,20 @@ package moe.ono.hooks.dispatcher
 import de.robv.android.xposed.XC_MethodHook
 import moe.ono.hooks._base.ApiHookItem
 import moe.ono.hooks._core.annotation.HookItem
-import moe.ono.hooks.item.chat.MessageEncryptor
 import moe.ono.hooks.item.chat.FakeFileRecall
+import moe.ono.hooks.item.chat.MessageEncryptor
 import moe.ono.hooks.item.chat.StickerPanelEntry
 import moe.ono.hooks.item.developer.QQMessageFetcher
 import moe.ono.hooks.item.entertainment.ModifyTextMessage
 import moe.ono.hooks.item.entertainment.RespondFace
 import moe.ono.hooks.item.sigma.QQMessageTracker
+import moe.ono.hooks.item.developer.PatPatMenuEntry
 import moe.ono.util.Logger
 import java.lang.reflect.Modifier
 
 @HookItem(path = "API/对应类型消息菜单构建时回调接口")
 class MenuBuilderHook : ApiHookItem() {
+
     private val decorators: Array<OnMenuBuilder> = arrayOf(
         StickerPanelEntry(),
         QQMessageTracker(),
@@ -23,35 +25,42 @@ class MenuBuilderHook : ApiHookItem() {
         RespondFace(),
         MessageEncryptor(),
         FakeFileRecall(),
+
+        // ✅ 拍一拍菜单入口（新增）
+        PatPatMenuEntry(),
     )
 
     override fun entry(classLoader: ClassLoader) {
         val baseClass = classLoader.loadClass("com.tencent.mobileqq.aio.msglist.holder.component.BaseContentComponent")
+
         val getMsgMethodName = baseClass.declaredMethods.first {
             it.returnType == classLoader.loadClass("com.tencent.mobileqq.aio.msg.AIOMsgItem") && it.parameterTypes.isEmpty()
         }.name
+
         val getListMethodName = baseClass.declaredMethods.first {
             Modifier.isAbstract(it.modifiers) && it.returnType == MutableList::class.java && it.parameterTypes.isEmpty()
         }.name
+
         for (target in decorators.flatMap { it.targetTypes.asIterable() }.toMutableSet()) {
-//            Logger.d("target: $target")
             try {
                 hookAfter(classLoader.loadClass(target).getDeclaredMethod(getListMethodName)) { param ->
                     val getMsgMethod = baseClass.getDeclaredMethod(getMsgMethodName).apply { isAccessible = true }
-                    val aioMsgItem = getMsgMethod.invoke(param.thisObject)!!
-                    Logger.d(aioMsgItem.toString())
+                    val aioMsgItem = getMsgMethod.invoke(param.thisObject) ?: return@hookAfter
+
+                    Logger.d("MenuBuilderHook target=$target msg=$aioMsgItem")
+
                     for (decorator in decorators) {
                         if (target in decorator.targetTypes) {
-                            decorator.onGetMenu(aioMsgItem, target, param)
+                            runCatching { decorator.onGetMenu(aioMsgItem, target, param) }
+                                .onFailure { Logger.e("decorator.onGetMenu error: ${decorator.javaClass.name}", it) }
                         }
                     }
                 }
             } catch (_: NoSuchMethodException) {
-
             } catch (_: ClassNotFoundException) {
-
+            } catch (t: Throwable) {
+                Logger.e("MenuBuilderHook hook target fail: $target", t)
             }
-
         }
     }
 }
