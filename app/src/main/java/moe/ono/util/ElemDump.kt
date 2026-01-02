@@ -45,8 +45,8 @@ object ElemDump {
             Logger.i("PatInfo:")
             Logger.i("  elemClass = ${pat.elemClass}")
             Logger.i("  text      = ${pat.text}")
-            Logger.i("  fromUin    = ${pat.fromUin}")
-            Logger.i("  toUin      = ${pat.toUin}")
+            Logger.i("  fromUin   = ${pat.fromUin}")
+            Logger.i("  toUin     = ${pat.toUin}")
             Logger.i("  reason    = ${pat.hitReason}")
             if (pat.extra.isNotEmpty()) {
                 pat.extra.forEach { (k, v) -> Logger.i("  $k = $v") }
@@ -65,7 +65,6 @@ object ElemDump {
         val methods = msgRecord.javaClass.declaredMethods
             .filter { it.parameterTypes.isEmpty() && java.util.List::class.java.isAssignableFrom(it.returnType) }
 
-        // 1) method name 优先级：element/elem > list
         val sorted = methods.sortedWith(compareByDescending<Method> { m ->
             val n = m.name.lowercase()
             when {
@@ -101,41 +100,43 @@ object ElemDump {
 
     /**
      * 找拍一拍/戳一戳 element，并解析：
-     * - hit：类名/文案/字段特征（type/action/op/target）
-     * - from/to：优先字段直接命中；不行就递归找 uin
+     * - 先灰字结构：25.1.28.2（你贴的“灰字”）
+     * - 再旧版 element：类名/toString 命中 pat/poke/拍/戳
+     * - from/to：灰字优先取 25.1.20.*；否则走 element 的字段兜底
      */
     private fun findPatInfo(elements: List<Any?>): PatInfo? {
         for (e in elements) {
             if (e == null) continue
+
             val clsName = e.javaClass.name
             val s = runCatching { e.toString() }.getOrNull().orEmpty()
 
-            // 先把字段拍平（含浅递归）
-            val flat = flattenObject(e, maxDepth = 2, maxFields = 200)
+            // 字段拍平（含浅递归）
+            val flat = flattenObject(e, maxDepth = 2, maxFields = 300)
 
-            // 识别：类名 / toString / 关键字段
-            val reason = hitReason(clsName, s, flat) ?: continue
+            // 1) 强特征：灰字拍一拍（25.1.28.2）
+            tryParseGrayPat(flat)?.let { return it }
 
-            val text = pickFirst(flat,
+            // 2) 弱特征：旧版 element（类名/toString）
+            val reason = hitReason(clsName, s) ?: continue
+
+            val text = pickFirst(
+                flat,
                 "text", "content", "brief", "desc", "wording", "tip",
                 "msg", "summary", "display", "show", "hint"
-            )?.takeIf { it.isNotBlank() && it != "null" } ?: s.takeIf { it.isNotBlank() }
+            )?.takeIf { it.isNotBlank() && it != "null" }
+                ?: s.takeIf { it.isNotBlank() }
 
             // from / to：字段直接命中
             var from = pickFirst(flat, "fromuin", "senderuin", "srcuin", "operatoruin", "actionuin", "opuin", "uin")
-            var to   = pickFirst(flat, "touin", "targetuin", "dstuin", "receiveruin", "peeruin", "dstUin")
+            var to = pickFirst(flat, "touin", "targetuin", "dstuin", "receiveruin", "peeruin", "dstUin")
 
-            // 再补一刀：如果字段没取到，尝试在“operator/target”对象里找
+            // 补一刀：operator/target 下钻
             if (from.isNullOrBlank() || from == "null") {
-                from = pickFirst(flat,
-                    "operator.uin", "operatoruin.uin", "op.uin", "opuin.uin",
-                    "sender.uin", "from.uin"
-                )
+                from = pickFirst(flat, "operator.uin", "operatoruin.uin", "op.uin", "opuin.uin", "sender.uin", "from.uin")
             }
             if (to.isNullOrBlank() || to == "null") {
-                to = pickFirst(flat,
-                    "target.uin", "targetuin.uin", "peer.uin", "to.uin", "dst.uin"
-                )
+                to = pickFirst(flat, "target.uin", "targetuin.uin", "peer.uin", "to.uin", "dst.uin")
             }
 
             // extra：只保留关键字段，避免刷屏
@@ -146,7 +147,8 @@ object ElemDump {
                     kk.contains("uin") ||
                     kk.contains("text") || kk.contains("content") || kk.contains("word") || kk.contains("desc") || kk.contains("tip") ||
                     kk.contains("type") || kk.contains("action") || kk.contains("op") || kk.contains("target") ||
-                    kk.contains("id") || kk.contains("time")
+                    kk.contains("id") || kk.contains("time") ||
+                    kk.startsWith("25.") // 灰字相关也保留，便于对比
                 ) {
                     keep[k] = v
                 }
@@ -164,20 +166,54 @@ object ElemDump {
         return null
     }
 
-    private fun hitReason(clsName: String, toStr: String, flat: Map<String, String>): String? {
+    /**
+     * 新版灰字结构解析（你贴的结构）：
+     * - 文案：25.1.28.2
+     * - 相关 uin：优先 25.1.20.2 / 25.1.20.3 / 25.1.20.4（具体含义你后续可再校验）
+     */
+    private fun tryParseGrayPat(flat: Map<String, String>): PatInfo? {
+        val grayText = flat["25.1.28.2"]
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "null" }
+            ?: return null
+
+        // 这几个字段你贴的 JSON 里是存在的：20.{2,3,4}
+        val fromUin = flat["25.1.20.2"] ?: flat["25.1.20.3"] ?: flat["25.1.20.1"]
+        val toUin = flat["25.1.20.4"] ?: flat["25.1.28.3"]
+
+        val extra = LinkedHashMap<String, String>()
+        // 保留一组固定关键字段，方便你后续对照字段含义
+        val keysToKeep = arrayOf(
+            "25.1.1.1", "25.1.1.5", "25.1.1.14", "25.1.1.30", "25.1.1.50",
+            "25.1.20.2", "25.1.20.3", "25.1.20.4",
+            "25.1.28.1", "25.1.28.2", "25.1.28.3",
+            "25.1.30", "25.1.14"
+        )
+        for (k in keysToKeep) {
+            val v = flat[k]
+            if (!v.isNullOrBlank() && v != "null") extra[k] = v
+        }
+
+        return PatInfo(
+            elemClass = "GRAY_TIPS(25.1.28)",
+            text = grayText,
+            fromUin = fromUin,
+            toUin = toUin,
+            hitReason = "grayTips(25.1.28.2)",
+            extra = extra
+        )
+    }
+
+    /**
+     * 收紧命中条件：只用类名/toString
+     * 你原来的 (action/type + patWord) 太宽松，误判会很高。
+     */
+    private fun hitReason(clsName: String, toStr: String): String? {
         val c = clsName.lowercase()
         val t = toStr
 
         if (c.contains("poke") || c.contains("pat") || c.contains("nudge")) return "className($clsName)"
         if (t.contains("拍了拍") || t.contains("戳了戳") || t.contains("拍一拍")) return "toString($toStr)"
-
-        // 字段特征：出现 action/type 且 文案相关字段里有 pat/poke/拍/戳
-        val anyAction = flat.keys.any { it.lowercase().contains("action") || it.lowercase().contains("type") }
-        val anyPatWord = flat.values.any { v ->
-            v.contains("拍了拍") || v.contains("戳了戳") || v.contains("拍一拍") ||
-            v.contains("pat", true) || v.contains("poke", true) || v.contains("nudge", true)
-        }
-        if (anyAction && anyPatWord) return "fields(action/type + patWord)"
 
         return null
     }
@@ -254,7 +290,6 @@ object ElemDump {
                     if (v == null || isLeaf(v)) {
                         out[key] = valueToString(v)
                     } else {
-                        // 继续下钻
                         walk(v, key, depth + 1)
                     }
                 }
