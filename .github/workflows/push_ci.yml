@@ -50,6 +50,7 @@ jobs:
 
       # =====================================================
       # main / 手动：解码 keystore（要求 secrets 必须存在）
+      # 输出到 repo/app/ono.jks
       # =====================================================
       - name: Decode keystore (main/manual)
         if: github.event_name != 'pull_request'
@@ -95,6 +96,10 @@ jobs:
 
       # =====================================================
       # main / 手动：构建正式签名 Release
+      #
+      # 关键点：
+      # - 你的 build.gradle.kts 在 :app 里用 file(KEYSTORE_FILE)
+      # - 所以这里必须传 "ono.jks"，它会解析到 repo/app/ono.jks
       # =====================================================
       - name: Build signed Release (main/manual)
         if: github.event_name != 'pull_request'
@@ -102,7 +107,7 @@ jobs:
         run: |
           set -euxo pipefail
           ./gradlew :app:assembleRelease \
-            -PKEYSTORE_FILE=app/ono.jks \
+            -PKEYSTORE_FILE=ono.jks \
             -PKEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}" \
             -PKEY_ALIAS="${{ secrets.KEY_ALIAS }}" \
             -PKEY_PASSWORD="${{ secrets.KEY_PASSWORD }}" \
