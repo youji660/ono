@@ -12,7 +12,6 @@ import moe.ono.reflex.ClassUtils
 import moe.ono.reflex.FieldUtils
 import moe.ono.reflex.MethodUtils
 import moe.ono.util.Logger
-import moe.ono.util.QAppUtils
 import java.lang.reflect.Method
 
 @HookItem(path = "API/监听QQMsgView更新")
@@ -22,9 +21,6 @@ class QQMessageViewListener : ApiHookItem() {
         private val ON_AIO_CHAT_VIEW_UPDATE_LISTENER_MAP:
             HashMap<BaseSwitchFunctionHookItem, OnChatViewUpdateListener> = HashMap()
 
-        /**
-         * 添加消息监听器 责任链模式
-         */
         @JvmStatic
         fun addMessageViewUpdateListener(
             hookItem: BaseSwitchFunctionHookItem,
@@ -34,21 +30,25 @@ class QQMessageViewListener : ApiHookItem() {
         }
 
         /**
+         * 兼容 findClass：先走 ClassUtils（你项目里只有 findClass(String)），失败再 loader.loadClass
+         */
+        private fun findClassCompat(name: String, loader: ClassLoader): Class<*>? {
+            return runCatching { ClassUtils.findClass(name) }.getOrNull()
+                ?: runCatching { loader.loadClass(name) }.getOrNull()
+        }
+
+        /**
          * 兼容查找：AIOBubbleMsgItemVB 中“更新气泡View”的方法
-         * 特征：
-         * - 返回 void
-         * - 参数数量 = 4
-         * - 包含：int / Bundle / List（Ignore 在不同版本会变，不能硬绑）
          */
         private fun findCompatOnMsgViewUpdate(loader: ClassLoader): Method? {
-            val clz = runCatching {
-                ClassUtils.findClass("com.tencent.mobileqq.aio.msglist.holder.AIOBubbleMsgItemVB", loader)
-            }.getOrNull() ?: run {
+            val clz = findClassCompat(
+                "com.tencent.mobileqq.aio.msglist.holder.AIOBubbleMsgItemVB",
+                loader
+            ) ?: run {
                 Logger.e("[QQMessageViewListener] class not found: AIOBubbleMsgItemVB")
                 return null
             }
 
-            // 先走你们 MethodUtils 的“宽松扫描”方式：只限定返回 void + 4参
             val candidates = clz.declaredMethods
                 .asSequence()
                 .filter { it.returnType == Void.TYPE }
@@ -64,16 +64,12 @@ class QQMessageViewListener : ApiHookItem() {
             fun hasList(ps: Array<Class<*>>) =
                 ps.any { java.util.List::class.java.isAssignableFrom(it) }
 
-            // 最优：同时具备 int + Bundle + List
             val best = candidates.firstOrNull { m ->
                 val ps = m.parameterTypes
                 hasInt(ps) && hasBundle(ps) && hasList(ps)
-            } ?: run {
-                // 次优：具备 Bundle + List（某些版本没有 int 或 int 被包装/换位）
-                candidates.firstOrNull { m ->
-                    val ps = m.parameterTypes
-                    hasBundle(ps) && hasList(ps)
-                }
+            } ?: candidates.firstOrNull { m ->
+                val ps = m.parameterTypes
+                hasBundle(ps) && hasList(ps)
             }
 
             if (best == null) {
@@ -81,7 +77,6 @@ class QQMessageViewListener : ApiHookItem() {
                     "[QQMessageViewListener] compat method not found on ${clz.name}, " +
                         "candidates=${candidates.size}"
                 )
-                // 可选：输出候选签名便于你定位
                 candidates.take(8).forEach { m ->
                     Logger.e("[QQMessageViewListener] cand: ${m.name}(${m.parameterTypes.joinToString { it.name }})")
                 }
@@ -96,7 +91,6 @@ class QQMessageViewListener : ApiHookItem() {
 
     override fun entry(loader: ClassLoader) {
         val onMsgViewUpdate = findCompatOnMsgViewUpdate(loader) ?: run {
-            // 找不到就跳过，避免整模块炸
             Logger.e("[QQMessageViewListener] skip hook (method not found)")
             return
         }
@@ -108,8 +102,14 @@ class QQMessageViewListener : ApiHookItem() {
                 .fieldType(View::class.java)
                 .firstValue<View>(thisObject)
 
+            val aioMsgItemClz = findClassCompat("com.tencent.mobileqq.aio.msg.AIOMsgItem", loader)
+                ?: run {
+                    Logger.e("[QQMessageViewListener] class not found: AIOMsgItem")
+                    return@hookAfter
+                }
+
             val aioMsgItem = FieldUtils.create(thisObject)
-                .fieldType(ClassUtils.findClass("com.tencent.mobileqq.aio.msg.AIOMsgItem", loader))
+                .fieldType(aioMsgItemClz)
                 .firstValue<Any>(thisObject)
 
             onViewUpdate(aioMsgItem, msgView)
