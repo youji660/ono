@@ -47,7 +47,6 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.UUID
 import java.util.zip.Deflater
-import kotlin.math.abs
 
 @HookItem(path = "API/QQMsgRespHandler")
 class QQMsgRespHandler : ApiHookItem() {
@@ -142,14 +141,18 @@ class QQMsgRespHandler : ApiHookItem() {
                     if (!getItem(QQPacketHelperC2CDisplayFixer::class.java).isEnabled) {
                         return@hookBefore
                     }
+
                     val index = CacheConfig.getPbSendMsgPacketIndex()
                     Logger.d("pb.index", index.toString())
+
                     if (index >= 0) {
                         val msgtime = obj.getLong("3")
                         val seq = obj.getLong("14")
+
                         val pbObj = CacheConfig.getPbSendMsgPacket(index)
                         val toUin = getUinFromUid(pbObj.peerid)
                         val toPeerid = pbObj.peerid
+
                         if (!CheckUtils.isInteger(toPeerid)) {
                             val uin = QAppUtils.getCurrentUin()
                             val uid = QAppUtils.UserUinToPeerID(uin)
@@ -211,11 +214,11 @@ class QQMsgRespHandler : ApiHookItem() {
                                     "      \"1\": 166,\n" +
                                     "      \"3\": 11,\n" +
                                     "      \"4\": 0,\n" +
-                                    "      \"5\": ${pbSendCount},\n" +
+                                    "      \"5\": $pbSendCount,\n" +
                                     "      \"6\": $msgtime,\n" +
                                     "      \"7\": 1,\n" +
                                     "      \"11\": $seq,\n" +
-                                    "      \"28\": ${pbSendCount},\n" +
+                                    "      \"28\": $pbSendCount,\n" +
                                     "      \"12\": 0,\n" +
                                     "      \"14\": 0\n" +
                                     "    },\n" +
@@ -247,6 +250,7 @@ class QQMsgRespHandler : ApiHookItem() {
                             val raw = pbObj.content.trimStart()
                             val appendContent: Any =
                                 if (raw.startsWith("[")) JSONArray(raw) else JSONObject(raw)
+
                             appendToContentArray(originalJson, appendContent)
                             syncPacket2 = originalJson.toString(4)
 
@@ -258,6 +262,7 @@ class QQMsgRespHandler : ApiHookItem() {
                                 buildMessage(syncPacket2),
                                 PushExtraInfo()
                             )
+
                             CacheConfig.removeLastPbSendMsgPacket()
                             pbSendCount++
                             ONOConf.setInt("QQMsgRespHandler", "pbSendCount", pbSendCount)
@@ -271,7 +276,8 @@ class QQMsgRespHandler : ApiHookItem() {
 
                     if (MessageEncryptor.decryptMsg) {
                         MessageEncryptor.decryptMsg = false
-                        val key = "${MessageEncryptor.peerUid}:${MessageEncryptor.msgSeq}:${MessageEncryptor.senderUin}"
+                        val key =
+                            "${MessageEncryptor.peerUid}:${MessageEncryptor.msgSeq}:${MessageEncryptor.senderUin}"
                         MessageEncryptor.peerUid = ""
                         MessageEncryptor.senderUin = ""
                         MessageEncryptor.msgSeq = ""
@@ -283,8 +289,13 @@ class QQMsgRespHandler : ApiHookItem() {
                         if (encryptKey.isBlank()) return@hookBefore
 
                         val aesKey = AesUtils.md5(encryptKey)
-                        val encryptMsg = obj.optJSONObject("6")?.optJSONObject("3")?.optJSONObject("1")
-                            ?.optJSONArray("2")?.optJSONObject(2)?.optJSONObject("1")?.optJSONObject("12")
+                        val encryptMsg = obj.optJSONObject("6")
+                            ?.optJSONObject("3")
+                            ?.optJSONObject("1")
+                            ?.optJSONArray("2")
+                            ?.optJSONObject(2)
+                            ?.optJSONObject("1")
+                            ?.optJSONObject("12")
                             ?.optString("1")
 
                         if (encryptMsg == null) {
@@ -310,7 +321,8 @@ class QQMsgRespHandler : ApiHookItem() {
                         val decryptData = FunProtoData()
                         decryptData.fromBytes(getUnpPackage(decryptMsg))
 
-                        val decryptMsgData = decryptData.toJSON().optJSONObject("1")
+                        val decryptMsgData = decryptData.toJSON()
+                            .optJSONObject("1")
                             ?.optJSONArray("2")
                             ?.optJSONObject(2)
                             ?.optJSONObject("1")
@@ -409,6 +421,7 @@ class QQMsgRespHandler : ApiHookItem() {
                                         "  \"view\": \"contact\"\n" +
                                         "}"
                                 Logger.d(json)
+
                                 val content =
                                     "{\n" +
                                         "  \"51\": {\"1\": \"hex->${Utils.bytesToHex(compressData(json))}\"}\n" +
@@ -418,6 +431,7 @@ class QQMsgRespHandler : ApiHookItem() {
                                 val xml =
                                     """<?xml version="1.0" encoding="utf-8"?><msg brief="${PacketHelperDialog.etDesc.text}" m_fileName="${UUID.randomUUID()}" action="viewMultiMsg" tSum="1" flag="3" m_resid="$resid" serviceID="35" m_fileSize="0"><item layout="1"><title color="#000000" size="34">聊天记录</title><title color="#777777" size="26">${PacketHelperDialog.etDesc.text}</title><hr></hr><summary color="#808080" size="26">PacketHelper@ouom_pub</summary></item><source name="@ouom_pub"></source></msg>"""
                                 Logger.d("xml", xml)
+
                                 val json =
                                     """{
   "12": {
@@ -425,6 +439,7 @@ class QQMsgRespHandler : ApiHookItem() {
     "2": 60
   }
 }""".trim()
+
                                 Logger.d(json)
                                 PacketHelperDialog.setContentForLongmsg(json)
                             }
@@ -466,9 +481,6 @@ class QQMsgRespHandler : ApiHookItem() {
 
                 // 2) 旧版：数组里出现 pat_elem(49)
                 if (deepHasKey(obj, "49")) return true
-
-                // 3) 再加一条兜底：字符串关键词（可选）
-                // return deepHasKeyword(obj)
 
                 return false
             }
