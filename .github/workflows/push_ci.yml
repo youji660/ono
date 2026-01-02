@@ -23,7 +23,7 @@ on:
       - '.github/**'
       - '.github/workflows/**'
       - '.idea/**'
-  workflow_dispatch: {}   # 允许手动运行
+  workflow_dispatch: {}
 
 jobs:
   build:
@@ -48,33 +48,25 @@ jobs:
       - name: Grant execute permission
         run: chmod +x gradlew
 
-      # =====================================================
-      # 需要签名的场景：push(main) / 手动(workflow_dispatch)
-      # PR 不注入签名
-      # =====================================================
+      # main / 手动：解码 keystore（要求 secrets 必须存在）
       - name: Decode keystore (main/manual)
         if: github.event_name != 'pull_request'
         run: |
           set -euxo pipefail
+          test -n "${KEYSTORE_B64}"
           mkdir -p app
           echo "${KEYSTORE_B64}" | base64 -d > app/ono.jks
           ls -lah app/ono.jks
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
 
-      # =====================================================
-      # PR：构建 Release（不签名/用项目 fallback）
-      # =====================================================
+      # PR：构建 Release（不注入签名）
       - name: Build Release for PR (unsigned)
         if: github.event_name == 'pull_request'
         run: |
           set -euxo pipefail
           ./gradlew :app:assembleRelease \
-            --no-daemon \
-            --console=plain \
-            --info \
-            --stacktrace \
-            --warning-mode all \
+            --no-daemon --console=plain --info --stacktrace --warning-mode all \
             2>&1 | tee gradle.log
 
       - name: Upload PR APK (release)
@@ -85,23 +77,17 @@ jobs:
           path: app/build/outputs/apk/release/**/*.apk
           if-no-files-found: error
 
-      # =====================================================
-      # main / 手动：构建签名 Release
-      # =====================================================
+      # main / 手动：构建正式签名 Release
       - name: Build signed Release (main/manual)
         if: github.event_name != 'pull_request'
         run: |
           set -euxo pipefail
           ./gradlew :app:assembleRelease \
             -PKEYSTORE_FILE=app/ono.jks \
-            -PKEYSTORE_PASSWORD='${{ secrets.KEYSTORE_PASSWORD }}' \
-            -PKEY_ALIAS='${{ secrets.KEY_ALIAS }}' \
-            -PKEY_PASSWORD='${{ secrets.KEY_PASSWORD }}' \
-            --no-daemon \
-            --console=plain \
-            --info \
-            --stacktrace \
-            --warning-mode all \
+            -PKEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} \
+            -PKEY_ALIAS=${{ secrets.KEY_ALIAS }} \
+            -PKEY_PASSWORD=${{ secrets.KEY_PASSWORD }} \
+            --no-daemon --console=plain --info --stacktrace --warning-mode all \
             2>&1 | tee gradle.log
 
       - name: Upload Release APK (signed)
@@ -112,13 +98,10 @@ jobs:
           path: app/build/outputs/apk/release/**/*.apk
           if-no-files-found: error
 
-      # =====================================================
-      # 无论成功失败，都上传 gradle.log（关键）
-      # =====================================================
       - name: Upload Gradle log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gradle-log
           path: gradle.log
-          if-no-files-found: error
+          if-no-files-found: warn
