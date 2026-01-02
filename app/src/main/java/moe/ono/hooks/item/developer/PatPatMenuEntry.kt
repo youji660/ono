@@ -30,29 +30,22 @@ class PatPatMenuEntry : OnMenuBuilder {
         if (menuList.isEmpty()) return
 
         // 避免重复添加
-        if (menuList.any { safeGetTitle(it)?.contains("拍一拍") == true || safeGetTitle(it)?.contains("查看拍一拍缓存") == true }) {
-            return
-        }
+        if (menuList.any {
+                val t = safeGetTitle(it)
+                t?.contains("查看拍一拍缓存") == true || t?.contains("拍一拍") == true
+            }
+        ) return
 
         val ctxAct = ContextUtils.getCurrentActivity() ?: return
-
         val template = menuList[0]
-        var itemClz: Class<*> = template.javaClass
-
-        // 关键：ByteBuddy 动态类不能直接 new，退回到真实父类
-        if (itemClz.name.contains("\$ByteBuddy\$", ignoreCase = true) || itemClz.name.contains("ByteBuddy", ignoreCase = true)) {
-            val superClz = itemClz.superclass
-            if (superClz != null && superClz != Any::class.java) {
-                Logger.w("[PatPatMenuEntry] template is ByteBuddy: ${itemClz.name}, use superclass: ${superClz.name}")
-                itemClz = superClz
-            }
-        }
+        val itemClz = template.javaClass
 
         val newItem = runCatching {
             createMenuItemLike(itemClz, template)
         }.getOrNull() ?: run {
-            Logger.e("[PatPatMenuEntry] cannot create menu item, templateClz=${template.javaClass.name}, useClz=${itemClz.name}")
-            dumpConstructors(itemClz)
+            Logger.e("[PatPatMenuEntry] cannot create menu item, templateClz=${template.javaClass.name}")
+            dumpConstructors(template.javaClass)
+            template.javaClass.superclass?.let { dumpConstructors(it) }
             return
         }
 
@@ -65,13 +58,16 @@ class PatPatMenuEntry : OnMenuBuilder {
             val cache = QQMsgRespHandler.PatPatCache
             val json: JSONObject? = cache.lastJson
             val text: String? = cache.lastText
+
             SyncUtils.runOnUiThread {
                 if (json != null) {
                     JsonViewerDialog.createView(
                         CommonContextWrapper.createAppCompatContext(ctxAct),
                         json
                     )
-                    if (!text.isNullOrBlank()) Toasts.success(ctxAct, text)
+                    if (!text.isNullOrBlank()) {
+                        Toasts.success(ctxAct, text)
+                    }
                 } else {
                     Toasts.error(ctxAct, "暂无拍一拍缓存（先触发一次拍一拍）")
                 }
@@ -89,12 +85,28 @@ class PatPatMenuEntry : OnMenuBuilder {
     }
 
     // -------------------------
-    // 反射适配层
+    // 创建菜单项（核心：优先 clone/copy，再 new，最后回退父类）
     // -------------------------
 
     private fun createMenuItemLike(itemClz: Class<*>, template: Any): Any {
-        // 1) 常见构造器
-        itemClz.declaredConstructors.forEach { c ->
+        val tplClz = template.javaClass
+
+        // 0) ByteBuddy/动态代理：最稳的是 clone/copy 模板对象本体
+        runCatching {
+            tplClz.methods.firstOrNull { it.name == "clone" && it.parameterTypes.isEmpty() }?.let { m ->
+                m.isAccessible = true
+                val obj = m.invoke(template)
+                if (obj != null) return obj
+            }
+            tplClz.methods.firstOrNull { it.name == "copy" && it.parameterTypes.isEmpty() }?.let { m ->
+                m.isAccessible = true
+                val obj = m.invoke(template)
+                if (obj != null) return obj
+            }
+        }
+
+        // 1) 尝试 new 模板类本身（如果可实例化）
+        tplClz.declaredConstructors.forEach { c ->
             runCatching {
                 c.isAccessible = true
                 val p = c.parameterTypes
@@ -111,76 +123,95 @@ class PatPatMenuEntry : OnMenuBuilder {
             }.onSuccess { return it }
         }
 
-        // 2) clone/copy
-        runCatching {
-            val m = itemClz.methods.firstOrNull { it.name == "clone" && it.parameterTypes.isEmpty() }
-            if (m != null) {
-                m.isAccessible = true
-                return m.invoke(template)
+        // 2) 回退：一路向上尝试父类构造器
+        var superClz = tplClz.superclass
+        while (superClz != null && superClz != Any::class.java) {
+            superClz.declaredConstructors.forEach { c ->
+                runCatching {
+                    c.isAccessible = true
+                    val p = c.parameterTypes
+                    return when {
+                        p.isEmpty() -> c.newInstance()
+                        p.size == 1 && CharSequence::class.java.isAssignableFrom(p[0]) -> c.newInstance("")
+                        p.size == 1 && p[0] == String::class.java -> c.newInstance("")
+                        p.size == 2 && p[0] == Int::class.javaPrimitiveType && CharSequence::class.java.isAssignableFrom(p[1]) ->
+                            c.newInstance(0, "")
+                        p.size == 2 && p[0] == Int::class.javaPrimitiveType && p[1] == String::class.java ->
+                            c.newInstance(0, "")
+                        else -> null
+                    } ?: throw IllegalStateException("super ctor not match")
+                }.onSuccess { return it }
             }
+            superClz = superClz.superclass
         }
 
-        // 3) Xposed newInstance 兜底（必须是可实例化类）
+        // 3) 最后兜底（可能仍失败，但上面都试过了）
         return XposedHelpers.newInstance(itemClz)
     }
 
+    // -------------------------
+    // 标题读取/设置
+    // -------------------------
+
     private fun safeGetTitle(item: Any): String? {
-        // getTitle()
         runCatching {
-            val m = item.javaClass.methods.firstOrNull { it.name.equals("getTitle", true) && it.parameterTypes.isEmpty() }
+            val m = item.javaClass.methods.firstOrNull {
+                it.name.equals("getTitle", true) && it.parameterTypes.isEmpty()
+            }
             if (m != null) return m.invoke(item)?.toString()
         }
-        // field title/text（包含父类）
-        findFieldRecursive(item.javaClass) { f ->
-            f.name.contains("title", true) || f.name.contains("text", true)
-        }?.let { f ->
-            runCatching {
-                f.isAccessible = true
-                return f.get(item)?.toString()
-            }
-        }
-        return null
+
+        val f = findFieldRecursive(item.javaClass) {
+            it.name.contains("title", true) || it.name.contains("text", true)
+        } ?: return null
+
+        return runCatching {
+            f.isAccessible = true
+            f.get(item)?.toString()
+        }.getOrNull()
     }
 
     private fun setTitle(item: Any, title: String) {
-        // setTitle(xxx)
         item.javaClass.methods.firstOrNull {
             it.name.equals("setTitle", true) && it.parameterTypes.size == 1
-        }?.let {
-            it.isAccessible = true
-            it.invoke(item, title)
+        }?.let { m ->
+            m.isAccessible = true
+            m.invoke(item, title)
             return
         }
 
-        // field title/text（包含父类）
         val f = findFieldRecursive(item.javaClass) {
             it.name.contains("title", true) || it.name.contains("text", true)
         } ?: return
+
         f.isAccessible = true
         f.set(item, title)
     }
 
     private fun setId(item: Any, id: Int) {
-        // setId(int)
         item.javaClass.methods.firstOrNull {
             it.name.equals("setId", true) &&
                 it.parameterTypes.size == 1 &&
                 it.parameterTypes[0] == Int::class.javaPrimitiveType
-        }?.let {
-            it.isAccessible = true
-            it.invoke(item, id)
+        }?.let { m ->
+            m.isAccessible = true
+            m.invoke(item, id)
             return
         }
 
-        // field id/itemId（包含父类）
         val f = findFieldRecursive(item.javaClass) {
             it.name.equals("id", true) || it.name.contains("itemId", true)
         } ?: return
+
         f.isAccessible = true
         if (f.type == Int::class.javaPrimitiveType || f.type == Int::class.java) {
             f.set(item, id)
         }
     }
+
+    // -------------------------
+    // 绑定点击（3 套策略）
+    // -------------------------
 
     private fun bindClick(item: Any, click: () -> Unit): Boolean {
         // 1) setOnClickListener(View.OnClickListener)
@@ -194,7 +225,7 @@ class PatPatMenuEntry : OnMenuBuilder {
             return true
         }
 
-        // 2) 字段里有 OnClickListener（包含父类）
+        // 2) 字段里直接存 View.OnClickListener（递归父类）
         findFieldRecursive(item.javaClass) {
             View.OnClickListener::class.java.isAssignableFrom(it.type)
         }?.let { f ->
@@ -203,9 +234,11 @@ class PatPatMenuEntry : OnMenuBuilder {
             return true
         }
 
-        // 3) 接口回调代理兜底（字段名含 callback/action/onClick）（包含父类）
+        // 3) 接口回调字段（callback/action/onClick）→ Proxy
         val cbField = findFieldRecursive(item.javaClass) {
-            it.name.contains("callback", true) || it.name.contains("action", true) || it.name.contains("onClick", true)
+            it.name.contains("callback", true) ||
+                it.name.contains("action", true) ||
+                it.name.contains("onClick", true)
         } ?: return false
 
         val t = cbField.type
@@ -221,7 +254,10 @@ class PatPatMenuEntry : OnMenuBuilder {
         return true
     }
 
-    private fun findFieldRecursive(clz: Class<*>, pred: (java.lang.reflect.Field) -> Boolean): java.lang.reflect.Field? {
+    private fun findFieldRecursive(
+        clz: Class<*>,
+        pred: (java.lang.reflect.Field) -> Boolean
+    ): java.lang.reflect.Field? {
         var c: Class<*>? = clz
         while (c != null && c != Any::class.java) {
             c.declaredFields.firstOrNull(pred)?.let { return it }
@@ -231,7 +267,7 @@ class PatPatMenuEntry : OnMenuBuilder {
     }
 
     // -------------------------
-    // debug（可留着，方便你定位）
+    // debug 输出（保留，出问题看日志就能定位）
     // -------------------------
 
     private fun dumpConstructors(clz: Class<*>) {
