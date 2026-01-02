@@ -47,16 +47,30 @@ android {
     buildTypes {
         val releaseSigning = signingConfigs.getByName("release")
         val debugSigning = signingConfigs.getByName("debug")
+        val isCi = (System.getenv("CI") ?: "false").toBoolean()
 
         release {
             isMinifyEnabled = true
             isShrinkResources = true
 
-            signingConfig = if (releaseSigning.storeFile?.exists() == true) {
-                releaseSigning
+            if (isCi) {
+                // CI：必须使用 release keystore，缺任何一项直接失败
+                require(releaseSigning.storeFile?.exists() == true) {
+                    "CI requires release keystore file. Not found: ${releaseSigning.storeFile?.path}"
+                }
+                require(!releaseSigning.storePassword.isNullOrBlank()) { "CI requires KEYSTORE_PASSWORD" }
+                require(!releaseSigning.keyAlias.isNullOrBlank()) { "CI requires KEY_ALIAS" }
+                require(!releaseSigning.keyPassword.isNullOrBlank()) { "CI requires KEY_PASSWORD" }
+
+                signingConfig = releaseSigning
             } else {
-                println("✅ No release keystore detected; using DEBUG signing for release variant (PR-friendly).")
-                debugSigning
+                // 本地：允许 fallback（可选）
+                signingConfig = if (releaseSigning.storeFile?.exists() == true) {
+                    releaseSigning
+                } else {
+                    println("✅ No release keystore detected; using DEBUG signing for release variant (local-friendly).")
+                    debugSigning
+                }
             }
 
             proguardFiles(
