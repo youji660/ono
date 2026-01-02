@@ -48,6 +48,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.UUID
 import java.util.zip.Deflater
+import kotlin.math.abs
 
 @HookItem(path = "API/QQMsgRespHandler")
 class QQMsgRespHandler : ApiHookItem() {
@@ -62,26 +63,34 @@ class QQMsgRespHandler : ApiHookItem() {
                 .get()
         ) { param ->
 
-            val serviceMsg: ToServiceMsg = XField.obj(param.args[1]).name("toServiceMsg").get()
-            val fromServiceMsg: FromServiceMsg = XField.obj(param.args[1]).name("fromServiceMsg").get()
+            // ---------------------------
+            // 防崩溃：args[1]/字段都可能不符合预期
+            // ---------------------------
+            val pair = param.args.getOrNull(1) ?: return@hookBefore
 
-            val cmd = fromServiceMsg.serviceCmd ?: ""
+            val serviceMsg: ToServiceMsg = runCatching {
+                XField.obj(pair).name("toServiceMsg").get<ToServiceMsg>()
+            }.getOrNull() ?: return@hookBefore
+
+            val fromServiceMsg: FromServiceMsg = runCatching {
+                XField.obj(pair).name("fromServiceMsg").get<FromServiceMsg>()
+            }.getOrNull() ?: return@hookBefore
+
+            val cmd = runCatching { fromServiceMsg.serviceCmd }.getOrNull().orEmpty()
 
             val obj: JSONObject = try {
                 val data = FunProtoData()
                 data.fromBytes(getUnpPackage(fromServiceMsg.wupBuffer))
                 val json = data.toJSON()
 
-                // ============ 你原有的 handlers 分发 ============
+                // handlers 分发（保留）
                 handlers.forEach { handler ->
                     if (handler.cmd == cmd) {
                         handler.onHandle(json, serviceMsg, fromServiceMsg)
                     }
                 }
-
                 json
             } catch (_: Exception) {
-                // 解析失败也要走 handlers（你原逻辑）
                 handlers.forEach { handler ->
                     if (handler.cmd == cmd) {
                         handler.onHandle(null, serviceMsg, fromServiceMsg)
@@ -91,30 +100,18 @@ class QQMsgRespHandler : ApiHookItem() {
             }
 
             // ==========================================================
-            // 1) 单独抓「拍一拍」：不依赖具体 cmd，先用 JSON 深度扫描兜底
-            //    你要“单独抓拍一拍”，就必须在这里提前分流
+            // 拍一拍专用捕获：优先在这里独立抓取（不 return，不影响原逻辑）
             // ==========================================================
             runCatching {
-                if (isPatPatEvent(cmd, obj)) {
-                    val text = extractPatPatText(obj) ?: "拍一拍(未提取到文案)"
-                    // 内存缓存：后续你想做 UI/弹窗/上传都从这里取
-                    CachePatPat.lastCmd = cmd
-                    CachePatPat.lastText = text
-                    CachePatPat.lastJson = obj
-                    CachePatPat.lastTs = System.currentTimeMillis()
-
-                    Logger.w("[PATPAT] hit cmd=$cmd, text=$text")
-                    // 如果你想临时弹Toast，取消注释即可：
-                    // SyncUtils.runOnUiThread { Toasts.success(ContextUtils.getCurrentActivity(), "抓到拍一拍：$text") }
-
-                    // 注意：拍一拍一般是灰字/提示类 push，不建议 return，避免影响其它逻辑
+                if (PatPat.detect(cmd, obj)) {
+                    PatPat.cache(cmd, obj)
                 }
             }.onFailure {
-                Logger.e("[PATPAT] detect error", it)
+                Logger.e("[PATPAT] error", it)
             }
 
             // ==========================================================
-            // 2) 你原来的 when(cmd) 逻辑保持不变
+            // 你原来的 when(cmd) 逻辑（保留）
             // ==========================================================
             when (cmd) {
                 "OidbSvcTrpcTcp.0x9067_202" -> {
@@ -160,39 +157,41 @@ class QQMsgRespHandler : ApiHookItem() {
                             val uin = QAppUtils.getCurrentUin()
                             val uid = QAppUtils.UserUinToPeerID(uin)
 
-                            val syncPacket1 = "{\n" +
-                                "  \"1\": {\n" +
-                                "    \"1\": {\n" +
-                                "      \"1\": $uin,\n" +
-                                "      \"2\": \"$uid\",\n" +
-                                "      \"5\": $uin,\n" +
-                                "      \"6\": \"$uid\"\n" +
-                                "    },\n" +
-                                "    \"2\": {\n" +
-                                "      \"1\": 528,\n" +
-                                "      \"2\": 8,\n" +
-                                "      \"3\": 8,\n" +
-                                "      \"4\": 0,\n" +
-                                "      \"5\": 0,\n" +
-                                "      \"6\": $msgtime,\n" +
-                                "      \"12\": 0" +
-                                "    },\n" +
-                                "    \"3\": {\n" +
-                                "      \"1\": {\n" +
-                                "      },\n" +
-                                "      \"2\": {\n" +
-                                "        \"1\": {\n" +
-                                "          \"1\": \"$toPeerid\",\n" +
-                                "          \"2\": $msgtime,\n" +
-                                "          \"20\": 0,\n" +
-                                "          \"21\": 0,\n" +
-                                "          \"9\": 0,\n" +
-                                "          \"11\": 0\n" +
-                                "        }\n" +
-                                "      }\n" +
-                                "    }\n" +
-                                "  }\n" +
-                                "}"
+                            val syncPacket1 =
+                                "{\n" +
+                                    "  \"1\": {\n" +
+                                    "    \"1\": {\n" +
+                                    "      \"1\": $uin,\n" +
+                                    "      \"2\": \"$uid\",\n" +
+                                    "      \"5\": $uin,\n" +
+                                    "      \"6\": \"$uid\"\n" +
+                                    "    },\n" +
+                                    "    \"2\": {\n" +
+                                    "      \"1\": 528,\n" +
+                                    "      \"2\": 8,\n" +
+                                    "      \"3\": 8,\n" +
+                                    "      \"4\": 0,\n" +
+                                    "      \"5\": 0,\n" +
+                                    "      \"6\": $msgtime,\n" +
+                                    "      \"12\": 0" +
+                                    "    },\n" +
+                                    "    \"3\": {\n" +
+                                    "      \"1\": {\n" +
+                                    "      },\n" +
+                                    "      \"2\": {\n" +
+                                    "        \"1\": {\n" +
+                                    "          \"1\": \"$toPeerid\",\n" +
+                                    "          \"2\": $msgtime,\n" +
+                                    "          \"20\": 0,\n" +
+                                    "          \"21\": 0,\n" +
+                                    "          \"9\": 0,\n" +
+                                    "          \"11\": 0\n" +
+                                    "        }\n" +
+                                    "      }\n" +
+                                    "    }\n" +
+                                    "  }\n" +
+                                    "}"
+
                             Logger.d("syncPacket1", syncPacket1)
                             callMethod(
                                 getIQQntWrapperSessionInstance(),
@@ -202,104 +201,99 @@ class QQMsgRespHandler : ApiHookItem() {
                                 PushExtraInfo()
                             )
 
-                            var syncPacket2 = "{\n" +
-                                "  \"1\": {\n" +
-                                "    \"1\": {\n" +
-                                "      \"1\": $uin,\n" +
-                                "      \"2\": \"$uid\",\n" +
-                                "      \"3\": 1001,\n" +
-                                "      \"5\": $toUin,\n" +
-                                "      \"6\": \"$toPeerid\"\n" +
-                                "    },\n" +
-                                "    \"2\": {\n" +
-                                "      \"1\": 166,\n" +
-                                "      \"3\": 11,\n" +
-                                "      \"4\": 0,\n" +
-                                "      \"5\": ${pbSendCount},\n" +
-                                "      \"6\": $msgtime,\n" +
-                                "      \"7\": 1,\n" +
-                                "      \"11\": $seq,\n" +
-                                "      \"28\": ${pbSendCount},\n" +
-                                "      \"12\": 0,\n" +
-                                "      \"14\": 0\n" +
-                                "    },\n" +
-                                "    \"3\": {\n" +
-                                "      \"1\": {\n" +
-                                "        \"1\": {\n" +
-                                "          \"1\": 0,\n" +
-                                "          \"2\": $msgtime,\n" +
-                                "          \"3\": 1490340800,\n" +
-                                "          \"4\": 0,\n" +
-                                "          \"5\": 10,\n" +
-                                "          \"6\": 0,\n" +
-                                "          \"7\": 134,\n" +
-                                "          \"8\": 2,\n" +
-                                "          \"9\": \"宋体\"\n" +
-                                "        },\n" +
-                                "        \"2\": [\n" +
-                                "          {\n" +
-                                "            \"37\": {\n" +
-                                "              \"17\": 105342,\n" +
-                                "              \"1\": 10896,\n" +
-                                "              \"19\": {\n" +
-                                "                \"96\": 0,\n" +
-                                "                \"34\": 0,\n" +
-                                "                \"102\": {\n" +
-                                "                  \"1\": {\n" +
-                                "                    \"1\": 0,\n" +
-                                "                    \"2\": 0,\n" +
-                                "                    \"3\": 0,\n" +
-                                "                    \"4\": 0\n" +
-                                "                  }\n" +
-                                "                },\n" +
-                                "                \"73\": {\n" +
-                                "                  \"2\": 0,\n" +
-                                "                  \"6\": 6\n" +
-                                "                },\n" +
-                                "                \"25\": 0,\n" +
-                                "                \"90\": {\n" +
-                                "                  \"1\": $seq,\n" +
-                                "                  \"2\": 0\n" +
-                                "                },\n" +
-                                "                \"30\": 0,\n" +
-                                "                \"31\": 0,\n" +
-                                "                \"15\": 65536\n" +
-                                "              }\n" +
-                                "            }\n" +
-                                "          },\n" +
-                                "          {\n" +
-                                "            \"9\": {\n" +
-                                "              \"1\": 2021111,\n" +
-                                "              \"12\": 65536\n" +
-                                "            }\n" +
-                                "          }\n" +
-                                "        ]\n" +
-                                "      }\n" +
-                                "    }\n" +
-                                "  },\n" +
-                                " \"3\": 1,\n" +
-                                "  \"4\": {\n" +
-                                "    \"1\": \"0.0.0.0\",\n" +
-                                "    \"2\": 20222,\n" +
-                                "    \"3\": {\n" +
-                                "      \"2\": 166,\n" +
-                                "      \"3\": 11600,\n" +
-                                "      \"4\": 0,\n" +
-                                "      \"7\": 1,\n" +
-                                "      \"8\": $uin\n" +
-                                "    }\n" +
-                                "  }\n" +
-                                "}"
+                            var syncPacket2 =
+                                "{\n" +
+                                    "  \"1\": {\n" +
+                                    "    \"1\": {\n" +
+                                    "      \"1\": $uin,\n" +
+                                    "      \"2\": \"$uid\",\n" +
+                                    "      \"3\": 1001,\n" +
+                                    "      \"5\": $toUin,\n" +
+                                    "      \"6\": \"$toPeerid\"\n" +
+                                    "    },\n" +
+                                    "    \"2\": {\n" +
+                                    "      \"1\": 166,\n" +
+                                    "      \"3\": 11,\n" +
+                                    "      \"4\": 0,\n" +
+                                    "      \"5\": ${pbSendCount},\n" +
+                                    "      \"6\": $msgtime,\n" +
+                                    "      \"7\": 1,\n" +
+                                    "      \"11\": $seq,\n" +
+                                    "      \"28\": ${pbSendCount},\n" +
+                                    "      \"12\": 0,\n" +
+                                    "      \"14\": 0\n" +
+                                    "    },\n" +
+                                    "    \"3\": {\n" +
+                                    "      \"1\": {\n" +
+                                    "        \"1\": {\n" +
+                                    "          \"1\": 0,\n" +
+                                    "          \"2\": $msgtime,\n" +
+                                    "          \"3\": 1490340800,\n" +
+                                    "          \"4\": 0,\n" +
+                                    "          \"5\": 10,\n" +
+                                    "          \"6\": 0,\n" +
+                                    "          \"7\": 134,\n" +
+                                    "          \"8\": 2,\n" +
+                                    "          \"9\": \"宋体\"\n" +
+                                    "        },\n" +
+                                    "        \"2\": [\n" +
+                                    "          {\n" +
+                                    "            \"37\": {\n" +
+                                    "              \"17\": 105342,\n" +
+                                    "              \"1\": 10896,\n" +
+                                    "              \"19\": {\n" +
+                                    "                \"96\": 0,\n" +
+                                    "                \"34\": 0,\n" +
+                                    "                \"102\": {\n" +
+                                    "                  \"1\": {\n" +
+                                    "                    \"1\": 0,\n" +
+                                    "                    \"2\": 0,\n" +
+                                    "                    \"3\": 0,\n" +
+                                    "                    \"4\": 0\n" +
+                                    "                  }\n" +
+                                    "                },\n" +
+                                    "                \"73\": {\n" +
+                                    "                  \"2\": 0,\n" +
+                                    "                  \"6\": 6\n" +
+                                    "                },\n" +
+                                    "                \"25\": 0,\n" +
+                                    "                \"90\": {\n" +
+                                    "                  \"1\": $seq,\n" +
+                                    "                  \"2\": 0\n" +
+                                    "                },\n" +
+                                    "                \"30\": 0,\n" +
+                                    "                \"31\": 0,\n" +
+                                    "                \"15\": 65536\n" +
+                                    "              }\n" +
+                                    "            }\n" +
+                                    "          },\n" +
+                                    "          {\n" +
+                                    "            \"9\": {\n" +
+                                    "              \"1\": 2021111,\n" +
+                                    "              \"12\": 65536\n" +
+                                    "            }\n" +
+                                    "          }\n" +
+                                    "        ]\n" +
+                                    "      }\n" +
+                                    "    }\n" +
+                                    "  },\n" +
+                                    " \"3\": 1,\n" +
+                                    "  \"4\": {\n" +
+                                    "    \"1\": \"0.0.0.0\",\n" +
+                                    "    \"2\": 20222,\n" +
+                                    "    \"3\": {\n" +
+                                    "      \"2\": 166,\n" +
+                                    "      \"3\": 11600,\n" +
+                                    "      \"4\": 0,\n" +
+                                    "      \"7\": 1,\n" +
+                                    "      \"8\": $uin\n" +
+                                    "    }\n" +
+                                    "  }\n" +
+                                    "}"
 
                             val originalJson = JSONObject(syncPacket2)
-
                             val raw = pbObj.content.trimStart()
-                            val appendContent: Any = if (raw.startsWith("[")) {
-                                JSONArray(raw)
-                            } else {
-                                JSONObject(raw)
-                            }
-
+                            val appendContent: Any = if (raw.startsWith("[")) JSONArray(raw) else JSONObject(raw)
                             appendToContentArray(originalJson, appendContent)
                             syncPacket2 = originalJson.toString(4)
 
@@ -430,57 +424,60 @@ class QQMsgRespHandler : ApiHookItem() {
 
                     try {
                         if (PacketHelperDialog.mRgSendBy.checkedRadioButtonId == R.id.rb_send_by_longmsg) {
-                            val content = "{\n" +
-                                "    \"37\": {\n" +
-                                "        \"6\": 1,\n" +
-                                "        \"7\": \"$resid\",\n" +
-                                "        \"17\": 0,\n" +
-                                "        \"19\": {\n" +
-                                "            \"15\": 0,\n" +
-                                "            \"31\": 0,\n" +
-                                "            \"41\": 0\n" +
-                                "        }\n" +
-                                "    }\n" +
-                                "}"
+                            val content =
+                                "{\n" +
+                                    "    \"37\": {\n" +
+                                    "        \"6\": 1,\n" +
+                                    "        \"7\": \"$resid\",\n" +
+                                    "        \"17\": 0,\n" +
+                                    "        \"19\": {\n" +
+                                    "            \"15\": 0,\n" +
+                                    "            \"31\": 0,\n" +
+                                    "            \"41\": 0\n" +
+                                    "        }\n" +
+                                    "    }\n" +
+                                    "}"
                             PacketHelperDialog.setContent(content, true)
 
                         } else if (PacketHelperDialog.mRgSendBy.checkedRadioButtonId == R.id.rb_send_by_forwarding) {
                             if (!PacketHelperDialog.mRbXmlForward.isChecked) {
-                                val json = "{\n" +
-                                    "  \"app\": \"com.tencent.multimsg\",\n" +
-                                    "  \"config\": {\n" +
-                                    "    \"autosize\": 1,\n" +
-                                    "    \"forward\": 1,\n" +
-                                    "    \"round\": 1,\n" +
-                                    "    \"type\": \"normal\",\n" +
-                                    "    \"width\": 300\n" +
-                                    "  },\n" +
-                                    "  \"desc\": \"${PacketHelperDialog.etHint.text}\",\n" +
-                                    "  \"extra\": \"{\\\"filename\\\":\\\"${UUID.randomUUID()}\\\",\\\"tsum\\\":1}\\n\",\n" +
-                                    "  \"meta\": {\n" +
-                                    "    \"detail\": {\n" +
-                                    "      \"news\": [\n" +
-                                    "        {\n" +
-                                    "          \"text\": \"${PacketHelperDialog.etDesc.text}\"\n" +
-                                    "        }\n" +
-                                    "      ],\n" +
-                                    "      \"resid\": \"$resid\",\n" +
-                                    "      \"source\": \"聊天记录\",\n" +
-                                    "      \"summary\": \"PacketHelper@ouom_pub\",\n" +
-                                    "      \"uniseq\": \"${UUID.randomUUID()}\"\n" +
-                                    "    }\n" +
-                                    "  },\n" +
-                                    "  \"prompt\": \"${PacketHelperDialog.etHint.text}\",\n" +
-                                    "  \"ver\": \"0.0.0.5\",\n" +
-                                    "  \"view\": \"contact\"\n" +
-                                    "}"
+                                val json =
+                                    "{\n" +
+                                        "  \"app\": \"com.tencent.multimsg\",\n" +
+                                        "  \"config\": {\n" +
+                                        "    \"autosize\": 1,\n" +
+                                        "    \"forward\": 1,\n" +
+                                        "    \"round\": 1,\n" +
+                                        "    \"type\": \"normal\",\n" +
+                                        "    \"width\": 300\n" +
+                                        "  },\n" +
+                                        "  \"desc\": \"${PacketHelperDialog.etHint.text}\",\n" +
+                                        "  \"extra\": \"{\\\"filename\\\":\\\"${UUID.randomUUID()}\\\",\\\"tsum\\\":1}\\n\",\n" +
+                                        "  \"meta\": {\n" +
+                                        "    \"detail\": {\n" +
+                                        "      \"news\": [\n" +
+                                        "        {\n" +
+                                        "          \"text\": \"${PacketHelperDialog.etDesc.text}\"\n" +
+                                        "        }\n" +
+                                        "      ],\n" +
+                                        "      \"resid\": \"$resid\",\n" +
+                                        "      \"source\": \"聊天记录\",\n" +
+                                        "      \"summary\": \"PacketHelper@ouom_pub\",\n" +
+                                        "      \"uniseq\": \"${UUID.randomUUID()}\"\n" +
+                                        "    }\n" +
+                                        "  },\n" +
+                                        "  \"prompt\": \"${PacketHelperDialog.etHint.text}\",\n" +
+                                        "  \"ver\": \"0.0.0.5\",\n" +
+                                        "  \"view\": \"contact\"\n" +
+                                        "}"
 
                                 Logger.d(json)
-                                val content = "{\n" +
-                                    "    \"51\": {\n" +
-                                    "        \"1\": \"hex->${Utils.bytesToHex(compressData(json))}\"\n" +
-                                    "    }\n" +
-                                    "}"
+                                val content =
+                                    "{\n" +
+                                        "    \"51\": {\n" +
+                                        "        \"1\": \"hex->${Utils.bytesToHex(compressData(json))}\"\n" +
+                                        "    }\n" +
+                                        "}"
                                 PacketHelperDialog.setContent(content, false)
                             } else {
                                 val xml =
@@ -488,7 +485,8 @@ class QQMsgRespHandler : ApiHookItem() {
 
                                 Logger.d("xml", xml)
 
-                                val json = """{
+                                val json =
+                                    """{
     "12": {
         "1": "hex->${Utils.bytesToHex(compressData(xml))}",
         "2": 60
@@ -510,14 +508,105 @@ class QQMsgRespHandler : ApiHookItem() {
 
     companion object {
 
-        // ============== 拍一拍缓存（内存级，最稳、最不侵入） ==============
-        object CachePatPat {
+        // ------------------ 原 handlers ------------------
+        val handlers = arrayListOf<IRespHandler>()
+
+        // ------------------ 拍一拍专用缓存 ------------------
+        object PatPatCache {
             @Volatile var lastCmd: String? = null
             @Volatile var lastText: String? = null
             @Volatile var lastJson: JSONObject? = null
             @Volatile var lastTs: Long = 0L
         }
 
+        // ------------------ 拍一拍识别/提取 ------------------
+        object PatPat {
+
+            private val KEYWORDS = arrayOf("拍了拍", "拍一拍", "拍拍", "patpat")
+
+            fun detect(cmd: String, obj: JSONObject): Boolean {
+                // 先做轻量判断：cmd 像 push + JSON 内命中关键词
+                val preferCmd = cmd.contains("push", true) ||
+                    cmd.contains("msgpush", true) ||
+                    cmd.contains("olpush", true) ||
+                    cmd.contains("notify", true)
+
+                // 不强依赖 cmd（不同版本不一致），但 preferCmd 作为加权
+                val hit = deepHasKeyword(obj)
+                return hit && (preferCmd || true)
+            }
+
+            fun cache(cmd: String, obj: JSONObject) {
+                val text = extractText(obj) ?: "拍一拍(未提取到文案)"
+                PatPatCache.lastCmd = cmd
+                PatPatCache.lastText = text
+                PatPatCache.lastJson = obj
+                PatPatCache.lastTs = System.currentTimeMillis()
+
+                Logger.w("[PATPAT] cmd=$cmd text=$text")
+                // 你想提示就开：
+                // SyncUtils.runOnUiThread { Toasts.success(ContextUtils.getCurrentActivity(), "抓到拍一拍：$text") }
+            }
+
+            private fun deepHasKeyword(any: Any?): Boolean {
+                if (any == null) return false
+                return when (any) {
+                    is JSONObject -> {
+                        val it = any.keys()
+                        while (it.hasNext()) {
+                            val k = it.next()
+                            if (deepHasKeyword(any.opt(k))) return true
+                        }
+                        false
+                    }
+                    is JSONArray -> {
+                        for (i in 0 until any.length()) {
+                            if (deepHasKeyword(any.opt(i))) return true
+                        }
+                        false
+                    }
+                    is String -> KEYWORDS.any { kw -> any.contains(kw, true) }
+                    else -> false
+                }
+            }
+
+            private fun extractText(obj: JSONObject): String? {
+                val list = ArrayList<String>(16)
+                collectStrings(obj, list)
+
+                val hits = list.filter { s -> KEYWORDS.any { kw -> s.contains(kw, true) } }
+                if (hits.isEmpty()) return null
+
+                // 选一个最像灰字提示的
+                return hits.sortedWith(
+                    compareBy<String> { if (it.contains("拍了拍")) 0 else 1 }
+                        .thenBy { abs(it.length - 18) }
+                ).firstOrNull()
+            }
+
+            private fun collectStrings(any: Any?, out: MutableList<String>) {
+                if (any == null) return
+                when (any) {
+                    is JSONObject -> {
+                        val it = any.keys()
+                        while (it.hasNext()) {
+                            collectStrings(any.opt(it.next()), out)
+                        }
+                    }
+                    is JSONArray -> {
+                        for (i in 0 until any.length()) {
+                            collectStrings(any.opt(i), out)
+                        }
+                    }
+                    is String -> {
+                        val s = any.trim()
+                        if (s.isNotEmpty() && s.length <= 256) out.add(s)
+                    }
+                }
+            }
+        }
+
+        // ------------------ 原 compressData 保留 ------------------
         fun compressData(data: String): ByteArray {
             val inputBytes = data.toByteArray(Charsets.UTF_8)
             val deflater = Deflater(Deflater.DEFAULT_COMPRESSION, false)
@@ -538,110 +627,9 @@ class QQMsgRespHandler : ApiHookItem() {
             System.arraycopy(compressedBytes, 0, result, 1, compressedBytes.size)
             return result
         }
-
-        val handlers = arrayListOf<IRespHandler>()
-
-        // ==========================================================
-        // 拍一拍识别（不押具体 cmd，先兜底）
-        // 你后面把真实 JSON 给我，我可以给你改成“精准字段判断”版本。
-        // ==========================================================
-        private val PATPAT_KEYWORDS = arrayOf(
-            "拍了拍",
-            "拍一拍",
-            "拍拍",
-            "patpat"
-        )
-
-        private fun isPatPatEvent(cmd: String, obj: JSONObject): Boolean {
-            // 经验：拍一拍多来自 push / msgpush / notify
-            // 但不同版本 cmd 不一样，所以先只作为加权，不做硬条件
-            val preferCmd = cmd.contains("Push", ignoreCase = true) ||
-                cmd.contains("MsgPush", ignoreCase = true) ||
-                cmd.contains("olpush", ignoreCase = true)
-
-            // 深度扫描字符串命中关键词即认为是拍一拍（先把包抓住再说）
-            val hitText = deepContainsKeyword(obj)
-
-            return hitText && (preferCmd || true)
-        }
-
-        private fun deepContainsKeyword(any: Any?): Boolean {
-            if (any == null) return false
-            return when (any) {
-                is JSONObject -> {
-                    val it = any.keys()
-                    while (it.hasNext()) {
-                        val k = it.next()
-                        val v = any.opt(k)
-                        if (deepContainsKeyword(v)) return true
-                    }
-                    false
-                }
-                is JSONArray -> {
-                    for (i in 0 until any.length()) {
-                        if (deepContainsKeyword(any.opt(i))) return true
-                    }
-                    false
-                }
-                is String -> {
-                    val s = any
-                    PATPAT_KEYWORDS.any { kw -> s.contains(kw, ignoreCase = true) }
-                }
-                else -> false
-            }
-        }
-
-        /**
-         * 尽量从 JSON 里提取“拍一拍文案”
-         * - 优先找包含关键词的最短/最像提示的一段文本
-         * - 找不到就返回 null
-         */
-        private fun extractPatPatText(obj: JSONObject): String? {
-            val candidates = ArrayList<String>(8)
-            collectStrings(obj, candidates)
-
-            val hits = candidates.filter { s ->
-                PATPAT_KEYWORDS.any { kw -> s.contains(kw, ignoreCase = true) }
-            }
-            if (hits.isEmpty()) return null
-
-            // 选一个“更像灰字提示”的：长度适中、包含“拍了拍”
-            val scored = hits.sortedWith(compareBy<String> { s ->
-                // 越小越优：优先包含“拍了拍”
-                if (s.contains("拍了拍")) 0 else 1
-            }.thenBy { s ->
-                // 越小越优：太长通常是整包 JSON 文案
-                kotlin.math.abs(s.length - 18)
-            })
-
-            return scored.firstOrNull()
-        }
-
-        private fun collectStrings(any: Any?, out: MutableList<String>) {
-            if (any == null) return
-            when (any) {
-                is JSONObject -> {
-                    val it = any.keys()
-                    while (it.hasNext()) {
-                        val k = it.next()
-                        collectStrings(any.opt(k), out)
-                    }
-                }
-                is JSONArray -> {
-                    for (i in 0 until any.length()) {
-                        collectStrings(any.opt(i), out)
-                    }
-                }
-                is String -> {
-                    val s = any.trim()
-                    if (s.isNotEmpty() && s.length <= 256) {
-                        out.add(s)
-                    }
-                }
-            }
-        }
     }
 
+    // ------------------ 原 appendToContentArray 保留 ------------------
     fun appendToContentArray(original: JSONObject, newContent: Any) {
         val contentArray = original
             .optJSONObject("1")
