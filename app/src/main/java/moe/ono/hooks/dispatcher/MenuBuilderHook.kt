@@ -6,11 +6,11 @@ import moe.ono.hooks._core.annotation.HookItem
 import moe.ono.hooks.item.chat.FakeFileRecall
 import moe.ono.hooks.item.chat.MessageEncryptor
 import moe.ono.hooks.item.chat.StickerPanelEntry
+import moe.ono.hooks.item.developer.PatPatMenuEntry
 import moe.ono.hooks.item.developer.QQMessageFetcher
 import moe.ono.hooks.item.entertainment.ModifyTextMessage
 import moe.ono.hooks.item.entertainment.RespondFace
 import moe.ono.hooks.item.sigma.QQMessageTracker
-import moe.ono.hooks.item.developer.PatPatMenuEntry
 import moe.ono.util.Logger
 import java.lang.reflect.Modifier
 
@@ -21,33 +21,50 @@ class MenuBuilderHook : ApiHookItem() {
         StickerPanelEntry(),
         QQMessageTracker(),
         QQMessageFetcher(),
+        PatPatMenuEntry(), // ✅ 建议放中间，方便排查
         ModifyTextMessage(),
         RespondFace(),
         MessageEncryptor(),
         FakeFileRecall(),
-
-        // ✅ 拍一拍菜单入口（新增）
-        PatPatMenuEntry(),
     )
 
     override fun entry(classLoader: ClassLoader) {
-        val baseClass = classLoader.loadClass("com.tencent.mobileqq.aio.msglist.holder.component.BaseContentComponent")
+        val baseClass = classLoader.loadClass(
+            "com.tencent.mobileqq.aio.msglist.holder.component.BaseContentComponent"
+        )
 
-        val getMsgMethodName = baseClass.declaredMethods.first {
-            it.returnType == classLoader.loadClass("com.tencent.mobileqq.aio.msg.AIOMsgItem") && it.parameterTypes.isEmpty()
-        }.name
+        // 找到 “拿消息对象”的方法
+        val aioMsgItemClz = classLoader.loadClass("com.tencent.mobileqq.aio.msg.AIOMsgItem")
+        val getMsgMethodName = baseClass.declaredMethods.firstOrNull {
+            it.returnType == aioMsgItemClz && it.parameterTypes.isEmpty()
+        }?.name ?: run {
+            Logger.e("MenuBuilderHook: cannot find getMsg method")
+            return
+        }
 
-        val getListMethodName = baseClass.declaredMethods.first {
-            Modifier.isAbstract(it.modifiers) && it.returnType == MutableList::class.java && it.parameterTypes.isEmpty()
-        }.name
+        // 找到 “构建菜单列表”的方法（更稳：返回类型 assignable to java.util.List）
+        val getListMethodName = baseClass.declaredMethods.firstOrNull {
+            Modifier.isAbstract(it.modifiers) &&
+                java.util.List::class.java.isAssignableFrom(it.returnType) &&
+                it.parameterTypes.isEmpty()
+        }?.name ?: run {
+            Logger.e("MenuBuilderHook: cannot find getMenuList method")
+            return
+        }
 
-        for (target in decorators.flatMap { it.targetTypes.asIterable() }.toMutableSet()) {
+        val targets = decorators.flatMap { it.targetTypes.asIterable() }.toMutableSet()
+        Logger.d("MenuBuilderHook: targets size=${targets.size} getList=$getListMethodName getMsg=$getMsgMethodName")
+
+        for (target in targets) {
             try {
-                hookAfter(classLoader.loadClass(target).getDeclaredMethod(getListMethodName)) { param ->
-                    val getMsgMethod = baseClass.getDeclaredMethod(getMsgMethodName).apply { isAccessible = true }
-                    val aioMsgItem = getMsgMethod.invoke(param.thisObject) ?: return@hookAfter
+                val clz = classLoader.loadClass(target)
+                val m = clz.getDeclaredMethod(getListMethodName)
 
-                    Logger.d("MenuBuilderHook target=$target msg=$aioMsgItem")
+                hookAfter(m) { param ->
+                    val getMsgMethod = baseClass.getDeclaredMethod(getMsgMethodName).apply { isAccessible = true }
+                    val aioMsgItem = runCatching { getMsgMethod.invoke(param.thisObject) }.getOrNull() ?: return@hookAfter
+
+                    Logger.d("MenuBuilderHook target=$target msg=$aioMsgItem result=${param.result?.javaClass?.name}")
 
                     for (decorator in decorators) {
                         if (target in decorator.targetTypes) {
@@ -57,7 +74,9 @@ class MenuBuilderHook : ApiHookItem() {
                     }
                 }
             } catch (_: NoSuchMethodException) {
+                // 目标类没这个方法，跳过
             } catch (_: ClassNotFoundException) {
+                // 某些版本没这个 component，跳过
             } catch (t: Throwable) {
                 Logger.e("MenuBuilderHook hook target fail: $target", t)
             }
@@ -68,56 +87,55 @@ class MenuBuilderHook : ApiHookItem() {
 interface OnMenuBuilder {
     val targetTypes: Array<String>
         get() = arrayOf(
-            "com.tencent.mobileqq.aio.aiogift.AIOTroopGiftComponent",                     // 群礼物
-            "com.tencent.mobileqq.aio.msglist.holder.component.anisticker.AIOAniStickerContentComponent", // 动态表情
-            "com.tencent.mobileqq.aio.msglist.holder.component.ark.AIOArkContentComponent",               // Ark 卡片
-            "com.tencent.mobileqq.aio.msglist.holder.component.ark.AIOCenterArkContentComponent",         // Ark 中央卡片
-            "com.tencent.mobileqq.aio.msglist.holder.component.avatar.AIOAvatarContentComponent",         // 头像
-            "com.tencent.mobileqq.aio.msglist.holder.component.chain.ChainAniStickerContentComponent",    // 连续动态表情
-            "com.tencent.mobileqq.aio.msglist.holder.component.facebubble.AIOFaceBubbleContentComponent", // 表情泡泡
-            "com.tencent.mobileqq.aio.msglist.holder.component.file.AIOFileContentComponent",             // 本地文件
-            "com.tencent.mobileqq.aio.msglist.holder.component.file.AIOOnlineFileContentComponent",       // 在线文件
-            "com.tencent.mobileqq.aio.msglist.holder.component.flashpic.AIOFlashPicContentComponent",     // 闪照
-            "com.tencent.mobileqq.aio.msglist.holder.component.fold.AIOFoldContentComponent",             // 折叠消息
-            "com.tencent.mobileqq.aio.msglist.holder.component.ickbreak.AIOIceBreakContentComponent",     // 破冰消息
-            "com.tencent.mobileqq.aio.msglist.holder.component.leftswipearea.AIOLeftSwipeAreaComponent",  // 左滑区域
-            "com.tencent.mobileqq.aio.msglist.holder.component.longmsg.AIOLongMsgContentComponent",       // 长消息
-            "com.tencent.mobileqq.aio.msglist.holder.component.markdown.AIORichContentComponent",         // 富文本 / Markdown
-            "com.tencent.mobileqq.aio.msglist.holder.component.markdown.AIOMarkdownContentComponent",     // Markdown 富文本
-            "com.tencent.mobileqq.aio.msglist.holder.component.marketface.AIOMarketFaceComponent",        // 商城表情
-            "com.tencent.mobileqq.aio.msglist.holder.component.mask.AIOContentMaskComponent",             // 内容蒙版
-            "com.tencent.mobileqq.aio.msglist.holder.component.mix.AIOMixContentComponent",               // 图文混排
-            "com.tencent.mobileqq.aio.msglist.holder.component.msgaction.AIOMsgRecommendComponent",       // 推荐操作
-            "com.tencent.mobileqq.aio.msglist.holder.component.msgfollow.AIOMsgFollowComponent",          // 关注提示
-            "com.tencent.mobileqq.aio.msglist.holder.component.msgreply.AIOMsgItemReplyComponent",        // 回复子项
-            "com.tencent.mobileqq.aio.msglist.holder.component.msgstatus.AIOMsgStatusComponent",          // 发送状态
-            "com.tencent.mobileqq.aio.msglist.holder.component.msgtail.AIOGeneralMsgTailContentComponent",// 消息尾
-            "com.tencent.mobileqq.aio.msglist.holder.component.multifoward.AIOMultifowardContentComponent",// 合并转发
-            "com.tencent.mobileqq.aio.msglist.holder.component.multipci.AIOMultiPicContentComponent",     // 多图
-            "com.tencent.mobileqq.aio.msglist.holder.component.nick.AIONickComponent",                    // 昵称
-            "com.tencent.mobileqq.aio.msglist.holder.component.pic.AIOPicContentComponent",               // 单图
-            "com.tencent.mobileqq.aio.msglist.holder.component.poke.AIOPokeContentComponent",             // 戳一戳
-            "com.tencent.mobileqq.aio.msglist.holder.component.position.AIOPositionMsgComponent",         // 地图位置
-            "com.tencent.mobileqq.aio.msglist.holder.component.prologue.AIOPrologueContentComponent",     // 新手引导
-            "com.tencent.mobileqq.aio.msglist.holder.component.ptt.AIOPttContentComponent",               // 语音
-            "com.tencent.mobileqq.aio.msglist.holder.component.reply.AIOReplyComponent",                  // 回复面板
-            "com.tencent.mobileqq.aio.msglist.holder.component.select.AIOSelectComponent",                // 选择器
-            "com.tencent.mobileqq.aio.msglist.holder.component.sysface.AIOSingleSysFaceContentComponent", // 系统表情
-            "com.tencent.mobileqq.aio.msglist.holder.component.template.AIOTemplateMsgComponent",         // 模板消息
-            "com.tencent.mobileqq.aio.msglist.holder.component.text.AIOTextContentComponent",             // 文本
-            "com.tencent.mobileqq.aio.msglist.holder.component.text.AIOUnsuportContentComponent",         // 不支持的文本
-            "com.tencent.mobileqq.aio.msglist.holder.component.timestamp.AIOTimestampComponent",          // 时间戳
-            "com.tencent.mobileqq.aio.msglist.holder.component.tofu.AIOTofuContentComponent",             // 豆腐卡片
-            "com.tencent.mobileqq.aio.msglist.holder.component.video.AIOVideoContentComponent",           // 视频
-            "com.tencent.mobileqq.aio.msglist.holder.component.videochat.AIOVideoResultContentComponent", // 视频通话结果
-            "com.tencent.mobileqq.aio.msglist.holder.component.zplan.AIOZPlanContentComponent",           // Z 运营位
-            "com.tencent.mobileqq.aio.msglist.holder.component.graptips.common.CommonGrayTipsComponent",  // 提示文本
-            "com.tencent.mobileqq.aio.msglist.holder.component.graptips.revoke.RevokeGrayTipsComponent",  // 撤回提示
-            "com.tencent.mobileqq.aio.msglist.holder.component.LocationShare.AIOLocationShareComponent",  // 位置共享
-            "com.tencent.mobileqq.aio.qwallet.AIOQWalletComponent",                                       // 红包转账
-            "com.tencent.mobileqq.aio.shop.AIOShopArkContentComponent",                                   // 商城 Ark 卡片
-            "com.tencent.qqnt.aio.sample.BusinessSampleContentComponent",                                 // 业务示例
-            "com.tencent.mobileqq.aio.msglist.holder.component.template.AIOTemplateMsgComponent"          // 新版合并转发
+            "com.tencent.mobileqq.aio.aiogift.AIOTroopGiftComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.anisticker.AIOAniStickerContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.ark.AIOArkContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.ark.AIOCenterArkContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.avatar.AIOAvatarContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.chain.ChainAniStickerContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.facebubble.AIOFaceBubbleContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.file.AIOFileContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.file.AIOOnlineFileContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.flashpic.AIOFlashPicContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.fold.AIOFoldContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.ickbreak.AIOIceBreakContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.leftswipearea.AIOLeftSwipeAreaComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.longmsg.AIOLongMsgContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.markdown.AIORichContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.markdown.AIOMarkdownContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.marketface.AIOMarketFaceComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.mask.AIOContentMaskComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.mix.AIOMixContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.msgaction.AIOMsgRecommendComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.msgfollow.AIOMsgFollowComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.msgreply.AIOMsgItemReplyComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.msgstatus.AIOMsgStatusComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.msgtail.AIOGeneralMsgTailContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.multifoward.AIOMultifowardContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.multipci.AIOMultiPicContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.nick.AIONickComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.pic.AIOPicContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.poke.AIOPokeContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.position.AIOPositionMsgComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.prologue.AIOPrologueContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.ptt.AIOPttContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.reply.AIOReplyComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.select.AIOSelectComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.sysface.AIOSingleSysFaceContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.template.AIOTemplateMsgComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.text.AIOTextContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.text.AIOUnsuportContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.timestamp.AIOTimestampComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.tofu.AIOTofuContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.video.AIOVideoContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.videochat.AIOVideoResultContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.zplan.AIOZPlanContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.graptips.common.CommonGrayTipsComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.graptips.revoke.RevokeGrayTipsComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.LocationShare.AIOLocationShareComponent",
+            "com.tencent.mobileqq.aio.qwallet.AIOQWalletComponent",
+            "com.tencent.mobileqq.aio.shop.AIOShopArkContentComponent",
+            "com.tencent.qqnt.aio.sample.BusinessSampleContentComponent",
         )
 
     fun onGetMenu(
