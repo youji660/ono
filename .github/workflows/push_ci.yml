@@ -48,21 +48,37 @@ jobs:
       - name: Grant execute permission
         run: chmod +x gradlew
 
+      # =====================================================
       # main / 手动：解码 keystore（要求 secrets 必须存在）
+      # =====================================================
       - name: Decode keystore (main/manual)
         if: github.event_name != 'pull_request'
+        shell: bash
         run: |
           set -euxo pipefail
           test -n "${KEYSTORE_B64}"
           mkdir -p app
-          echo "${KEYSTORE_B64}" | base64 -d > app/ono.jks
+          printf '%s' "${KEYSTORE_B64}" | base64 --decode > app/ono.jks
           ls -lah app/ono.jks
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
 
-      # PR：构建 Release（不注入签名）
+      # =====================================================
+      # main / 手动：验证 keystore（快速定位：B64/密码/alias 是否正确）
+      # =====================================================
+      - name: Verify keystore (main/manual)
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          keytool -list -keystore app/ono.jks -storetype JKS -storepass "${{ secrets.KEYSTORE_PASSWORD }}" | head -n 80
+
+      # =====================================================
+      # PR：构建 Release（不注入签名；由项目内 fallback 决定）
+      # =====================================================
       - name: Build Release for PR (unsigned)
         if: github.event_name == 'pull_request'
+        shell: bash
         run: |
           set -euxo pipefail
           ./gradlew :app:assembleRelease \
@@ -77,13 +93,16 @@ jobs:
           path: app/build/outputs/apk/release/**/*.apk
           if-no-files-found: error
 
+      # =====================================================
       # main / 手动：构建正式签名 Release
+      # =====================================================
       - name: Build signed Release (main/manual)
         if: github.event_name != 'pull_request'
+        shell: bash
         run: |
           set -euxo pipefail
           ./gradlew :app:assembleRelease \
-            -PKEYSTORE_FILE=ono.jks \
+            -PKEYSTORE_FILE=app/ono.jks \
             -PKEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}" \
             -PKEY_ALIAS="${{ secrets.KEY_ALIAS }}" \
             -PKEY_PASSWORD="${{ secrets.KEY_PASSWORD }}" \
