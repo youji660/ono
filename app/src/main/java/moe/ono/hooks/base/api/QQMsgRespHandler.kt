@@ -25,6 +25,7 @@ import moe.ono.hooks._core.factory.HookItemFactory.getItem
 import moe.ono.hooks.base.util.Toasts
 import moe.ono.hooks.item.chat.FakeFileRecall
 import moe.ono.hooks.item.chat.MessageEncryptor
+import moe.ono.hooks.base.api.PatPatStore
 import moe.ono.hooks.item.developer.QQPacketHelperC2CDisplayFixer
 import moe.ono.hooks.item.entertainment.ModifyTextMessage
 import moe.ono.hooks.protocol.buildMessage
