@@ -10,9 +10,17 @@ import moe.ono.ui.CommonContextWrapper
 import moe.ono.util.ContextUtils
 import moe.ono.util.Logger
 import moe.ono.util.SyncUtils
-import org.json.JSONObject
 import java.lang.reflect.Proxy
 
+// ✅ 关键：从 companion object 导入
+import moe.ono.hooks.base.api.QQMsgRespHandler.Companion.PatPatCache
+
+/**
+ * 在消息长按菜单里增加：
+ *  - “查看拍一拍缓存”
+ *
+ * 依赖：QQMsgRespHandler.Companion.PatPatCache
+ */
 class PatPatMenuEntry : OnMenuBuilder {
 
     override val targetTypes: Array<String>
@@ -22,7 +30,7 @@ class PatPatMenuEntry : OnMenuBuilder {
         val menuList = (param.result as? MutableList<Any>) ?: return
         if (menuList.isEmpty()) return
 
-        // 避免重复
+        // 避免重复添加
         if (menuList.any { safeGetTitle(it)?.contains("拍一拍") == true }) return
 
         val ctxAct = ContextUtils.getCurrentActivity() ?: return
@@ -37,12 +45,11 @@ class PatPatMenuEntry : OnMenuBuilder {
         runCatching { setTitle(newItem, "查看拍一拍缓存") }
             .onFailure { Logger.e("[PatPatMenuEntry] setTitle fail", it) }
 
-        runCatching { setId(newItem, 0x6F504154 /* oPAT */) }.onFailure { }
+        runCatching { setId(newItem, 0x6F504154 /* oPAT */) }.onFailure { /* ignore */ }
 
         val click = {
-            val cache = moe.ono.hooks.base.api.QQMsgRespHandler.PatPatCache
-            val json: JSONObject? = cache.lastJson
-            val text: String? = cache.lastText
+            val json = PatPatCache.lastJson
+            val text = PatPatCache.lastText
 
             SyncUtils.runOnUiThread {
                 if (json != null) {
@@ -50,7 +57,9 @@ class PatPatMenuEntry : OnMenuBuilder {
                         CommonContextWrapper.createAppCompatContext(ctxAct),
                         json
                     )
-                    if (!text.isNullOrBlank()) Toasts.success(ctxAct, text)
+                    if (!text.isNullOrBlank()) {
+                        Toasts.success(ctxAct, text)
+                    }
                 } else {
                     Toasts.error(ctxAct, "暂无拍一拍缓存（先触发一次拍一拍）")
                 }
@@ -64,6 +73,10 @@ class PatPatMenuEntry : OnMenuBuilder {
 
         menuList.add(newItem)
     }
+
+    // -------------------------
+    // 反射适配层
+    // -------------------------
 
     private fun createMenuItemLike(itemClz: Class<*>, template: Any): Any {
         itemClz.declaredConstructors.forEach { c ->
@@ -96,11 +109,15 @@ class PatPatMenuEntry : OnMenuBuilder {
 
     private fun safeGetTitle(item: Any): String? {
         runCatching {
-            val m = item.javaClass.methods.firstOrNull { it.name.equals("getTitle", true) && it.parameterTypes.isEmpty() }
+            val m = item.javaClass.methods.firstOrNull {
+                it.name.equals("getTitle", true) && it.parameterTypes.isEmpty()
+            }
             return m?.invoke(item)?.toString()
         }
         runCatching {
-            val f = item.javaClass.declaredFields.firstOrNull { it.name.contains("title", true) || it.name.contains("text", true) }
+            val f = item.javaClass.declaredFields.firstOrNull {
+                it.name.contains("title", true) || it.name.contains("text", true)
+            }
             if (f != null) {
                 f.isAccessible = true
                 return f.get(item)?.toString()
@@ -167,7 +184,9 @@ class PatPatMenuEntry : OnMenuBuilder {
         }
 
         val cbField = item.javaClass.declaredFields.firstOrNull {
-            it.name.contains("callback", true) || it.name.contains("action", true) || it.name.contains("onClick", true)
+            it.name.contains("callback", true) ||
+                it.name.contains("action", true) ||
+                it.name.contains("onClick", true)
         } ?: return false
 
         val t = cbField.type
