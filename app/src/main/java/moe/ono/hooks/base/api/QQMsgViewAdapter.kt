@@ -11,13 +11,13 @@ import moe.ono.hooks._base.ApiHookItem
 import moe.ono.hooks._core.annotation.HookItem
 import moe.ono.reflex.ClassUtils
 import moe.ono.reflex.FieldUtils
-import moe.ono.reflex.Ignore
 import moe.ono.reflex.MethodUtils
 import moe.ono.util.HostInfo
+import moe.ono.util.Logger
+import java.lang.reflect.Method
 
 @HookItem(path = "API/适配QQMsg内容ViewID")
 class QQMsgViewAdapter : ApiHookItem() {
-
 
     companion object {
         private var contentViewId = 0
@@ -28,9 +28,7 @@ class QQMsgViewAdapter : ApiHookItem() {
         }
 
         @JvmStatic
-        fun getContentViewId(): Int {
-            return contentViewId
-        }
+        fun getContentViewId(): Int = contentViewId
 
         @JvmStatic
         fun hasContentMessage(messageRootView: ViewGroup): Boolean {
@@ -54,42 +52,104 @@ class QQMsgViewAdapter : ApiHookItem() {
         )
     }
 
+    // 兼容：找到 AIOBubbleMsgItemVB 里“更新气泡View”的方法（void + 4参 + 含 Bundle/List/int）
+    private fun findCompatOnMsgViewUpdate(loader: ClassLoader): Method? {
+        val clz = runCatching {
+            // 你项目的 ClassUtils 只有 findClass(String)，不支持传 loader，所以这里兜底 loader.loadClass
+            runCatching { ClassUtils.findClass("com.tencent.mobileqq.aio.msglist.holder.AIOBubbleMsgItemVB") }.getOrNull()
+                ?: loader.loadClass("com.tencent.mobileqq.aio.msglist.holder.AIOBubbleMsgItemVB")
+        }.getOrNull() ?: run {
+            Logger.e("[QQMsgViewAdapter] class not found: AIOBubbleMsgItemVB")
+            return null
+        }
+
+        val candidates = clz.declaredMethods
+            .asSequence()
+            .filter { it.returnType == Void.TYPE }
+            .filter { it.parameterTypes.size == 4 }
+            .toList()
+
+        fun hasInt(ps: Array<Class<*>>) =
+            ps.any { it == Int::class.javaPrimitiveType || it == Int::class.java }
+
+        fun hasBundle(ps: Array<Class<*>>) =
+            ps.any { it == Bundle::class.java }
+
+        fun hasList(ps: Array<Class<*>>) =
+            ps.any { java.util.List::class.java.isAssignableFrom(it) }
+
+        val best = candidates.firstOrNull { m ->
+            val ps = m.parameterTypes
+            hasInt(ps) && hasBundle(ps) && hasList(ps)
+        } ?: candidates.firstOrNull { m ->
+            val ps = m.parameterTypes
+            hasBundle(ps) && hasList(ps)
+        }
+
+        if (best == null) {
+            Logger.e("[QQMsgViewAdapter] compat method not found on ${clz.name}, candidates=${candidates.size}")
+            candidates.take(8).forEach { m ->
+                Logger.e("[QQMsgViewAdapter] cand: ${m.name}(${m.parameterTypes.joinToString { it.name }})")
+            }
+            return null
+        }
+
+        best.isAccessible = true
+        Logger.i("[QQMsgViewAdapter] use method: ${best.name}(${best.parameterTypes.joinToString { it.simpleName }})")
+        return best
+    }
+
     override fun entry(loader: ClassLoader) {
-        if (findContentViewId() > 0) {
-            contentViewId = findContentViewId()
+        // 已缓存过 id 就不再 hook
+        findContentViewId().takeIf { it > 0 }?.let {
+            contentViewId = it
             return
         }
-        val onMsgViewUpdate =
-            MethodUtils.create("com.tencent.mobileqq.aio.msglist.holder.AIOBubbleMsgItemVB")
-                .returnType(Void.TYPE)
-                .params(Int::class.java, Ignore::class.java, List::class.java, Bundle::class.java)
-                .first()
+
+        val onMsgViewUpdate = findCompatOnMsgViewUpdate(loader) ?: run {
+            Logger.e("[QQMsgViewAdapter] skip hook (method not found)")
+            return
+        }
+
         unhook = hookAfter(onMsgViewUpdate) { param ->
-            val thisObject = param.thisObject
-            val msgView = FieldUtils.create(thisObject)
-                .fieldType(View::class.java)
-                .firstValue<View>(thisObject)
+            val thisObject = param.thisObject ?: return@hookAfter
 
-            val aioMsgItem = FieldUtils.create(thisObject)
-                .fieldType(ClassUtils.findClass("com.tencent.mobileqq.aio.msg.AIOMsgItem"))
-                .firstValue<Any>(thisObject)
+            val msgView = runCatching {
+                FieldUtils.create(thisObject)
+                    .fieldType(View::class.java)
+                    .firstValue<View>(thisObject)
+            }.getOrNull() as? ViewGroup ?: return@hookAfter
 
-            if (aioMsgItem == null || msgView == null) return@hookAfter
+            val aioMsgItem = runCatching {
+                FieldUtils.create(thisObject)
+                    .fieldType(ClassUtils.findClass("com.tencent.mobileqq.aio.msg.AIOMsgItem"))
+                    .firstValue<Any>(thisObject)
+            }.getOrNull() ?: return@hookAfter
 
-            val msgRecord: Any = MethodUtils.create(aioMsgItem.javaClass).methodName("getMsgRecord")
-                .callFirst(aioMsgItem)
+            val msgRecord = runCatching {
+                MethodUtils.create(aioMsgItem.javaClass)
+                    .methodName("getMsgRecord")
+                    .callFirst(aioMsgItem)
+            }.getOrNull() ?: return@hookAfter
 
-            val elements: ArrayList<Any> = FieldUtils.getField(
-                msgRecord, "elements",
-                ArrayList::class.java
-            )
+            // elements 字段不保证一定叫 elements：这里容错
+            val elements: List<Any> = runCatching {
+                @Suppress("UNCHECKED_CAST")
+                FieldUtils.getField(msgRecord, "elements", ArrayList::class.java) as ArrayList<Any>
+            }.getOrNull() ?: run {
+                // 如果没有 elements，你也可以先直接尝试找 BubbleLayoutCompatPress（多数版本可行）
+                findContentView(msgView)
+                return@hookAfter
+            }
 
             for (msgElement in elements) {
-                val type: Int =
+                val type: Int = runCatching {
                     FieldUtils.getField(msgElement, "elementType", Int::class.javaPrimitiveType)
-                //文本和图片类型的view 不解析其他类型的 否则解析不出来
+                }.getOrNull() ?: continue
+
+                // 文本/图片(<=2) 才解析，其他类型可能没有目标 view
                 if (type <= 2) {
-                    findContentView(msgView as ViewGroup)
+                    findContentView(msgView)
                     break
                 }
             }
@@ -97,16 +157,15 @@ class QQMsgViewAdapter : ApiHookItem() {
     }
 
     private fun findContentView(itemView: ViewGroup) {
-        for (i in 0..<itemView.childCount) {
+        for (i in 0 until itemView.childCount) {
             val child = itemView.getChildAt(i)
             if (child.javaClass.name == "com.tencent.qqnt.aio.holder.template.BubbleLayoutCompatPress") {
                 contentViewId = child.id
                 putContentViewId(child.id)
-                //解开hook
-                unhook?.unhook()
+                unhook?.unhook() // 找到就解 hook
+                Logger.i("[QQMsgViewAdapter] contentViewId=$contentViewId (cached + unhook)")
                 break
             }
         }
     }
-
 }
