@@ -3,6 +3,7 @@ package moe.ono.util
 import com.tencent.qqnt.kernel.nativeinterface.MsgRecord
 import java.lang.reflect.Method
 import java.util.IdentityHashMap
+import java.util.LinkedHashMap
 
 object ElemDump {
 
@@ -65,14 +66,16 @@ object ElemDump {
         val methods = msgRecord.javaClass.declaredMethods
             .filter { it.parameterTypes.isEmpty() && java.util.List::class.java.isAssignableFrom(it.returnType) }
 
-        val sorted = methods.sortedWith(compareByDescending<Method> { m ->
-            val n = m.name.lowercase()
-            when {
-                "element" in n || "elem" in n -> 100
-                "list" in n -> 50
-                else -> 0
-            }
-        }.thenBy { it.name })
+        val sorted = methods.sortedWith(
+            compareByDescending<Method> { m ->
+                val n = m.name.lowercase()
+                when {
+                    "element" in n || "elem" in n -> 100
+                    "list" in n -> 50
+                    else -> 0
+                }
+            }.thenBy { it.name }
+        )
 
         for (m in sorted) {
             val list = runCatching {
@@ -112,7 +115,7 @@ object ElemDump {
             val s = runCatching { e.toString() }.getOrNull().orEmpty()
 
             // 字段拍平（含浅递归）
-            val flat = flattenObject(e, maxDepth = 2, maxFields = 300)
+            val flat = flattenAny(e, maxDepth = 2, maxFields = 350)
 
             // 1) 强特征：灰字拍一拍（25.1.28.2）
             tryParseGrayPat(flat)?.let { return it }
@@ -167,9 +170,9 @@ object ElemDump {
     }
 
     /**
-     * 新版灰字结构解析（你贴的结构）：
+     * 新版灰字结构解析：
      * - 文案：25.1.28.2
-     * - 相关 uin：优先 25.1.20.2 / 25.1.20.3 / 25.1.20.4（具体含义你后续可再校验）
+     * - uin：优先 25.1.20.2 / 25.1.20.3 / 25.1.20.4（你后续可再校验含义）
      */
     private fun tryParseGrayPat(flat: Map<String, String>): PatInfo? {
         val grayText = flat["25.1.28.2"]
@@ -177,12 +180,10 @@ object ElemDump {
             ?.takeIf { it.isNotEmpty() && it != "null" }
             ?: return null
 
-        // 这几个字段你贴的 JSON 里是存在的：20.{2,3,4}
         val fromUin = flat["25.1.20.2"] ?: flat["25.1.20.3"] ?: flat["25.1.20.1"]
         val toUin = flat["25.1.20.4"] ?: flat["25.1.28.3"]
 
         val extra = LinkedHashMap<String, String>()
-        // 保留一组固定关键字段，方便你后续对照字段含义
         val keysToKeep = arrayOf(
             "25.1.1.1", "25.1.1.5", "25.1.1.14", "25.1.1.30", "25.1.1.50",
             "25.1.20.2", "25.1.20.3", "25.1.20.4",
@@ -206,14 +207,13 @@ object ElemDump {
 
     /**
      * 收紧命中条件：只用类名/toString
-     * 你原来的 (action/type + patWord) 太宽松，误判会很高。
      */
     private fun hitReason(clsName: String, toStr: String): String? {
         val c = clsName.lowercase()
-        val t = toStr
-
         if (c.contains("poke") || c.contains("pat") || c.contains("nudge")) return "className($clsName)"
-        if (t.contains("拍了拍") || t.contains("戳了戳") || t.contains("拍一拍")) return "toString($toStr)"
+
+        // 文案命中（中文关键字）
+        if (toStr.contains("拍了拍") || toStr.contains("戳了戳") || toStr.contains("拍一拍")) return "toString(hit)"
 
         return null
     }
@@ -242,41 +242,76 @@ object ElemDump {
     }
 
     /**
-     * 把对象字段拍平到 map：
-     * - key 支持 path：operator.uin 这种
-     * - 深度限制防死循环
-     * - IdentityHashMap 防循环引用
+     * 更通用的拍平：
+     * - 支持对象字段、List/Array/Map
+     * - path 用点号/下标，如: a.b[0].c
+     * - 深度/数量限制防刷屏
      */
-    private fun flattenObject(
-        obj: Any,
+    private fun flattenAny(
+        root: Any,
         maxDepth: Int,
         maxFields: Int
     ): Map<String, String> {
         val out = LinkedHashMap<String, String>()
         val seen = IdentityHashMap<Any, Boolean>()
 
+        fun put(prefix: String, v: Any?) {
+            if (prefix.isNotEmpty() && out.size < maxFields) out[prefix] = valueToString(v)
+        }
+
         fun walk(o: Any?, prefix: String, depth: Int) {
-            if (o == null) {
-                if (prefix.isNotEmpty()) out[prefix] = "null"
-                return
-            }
             if (out.size >= maxFields) return
 
-            // 基础类型直接写
-            if (isLeaf(o)) {
-                if (prefix.isNotEmpty()) out[prefix] = valueToString(o)
+            if (o == null) {
+                put(prefix, null)
+                return
+            }
+
+            if (isLeafAny(o)) {
+                put(prefix, o)
                 return
             }
 
             if (depth > maxDepth) {
-                if (prefix.isNotEmpty()) out[prefix] = valueToString(o)
+                put(prefix, o)
                 return
             }
 
-            // 循环引用保护
             if (seen.containsKey(o)) return
             seen[o] = true
 
+            // List
+            if (o is List<*>) {
+                for (i in 0 until o.size) {
+                    if (out.size >= maxFields) return
+                    walk(o[i], "$prefix[$i]", depth + 1)
+                }
+                return
+            }
+
+            // Array (Object[])
+            if (o.javaClass.isArray) {
+                val len = java.lang.reflect.Array.getLength(o)
+                for (i in 0 until len) {
+                    if (out.size >= maxFields) return
+                    val v = java.lang.reflect.Array.get(o, i)
+                    walk(v, "$prefix[$i]", depth + 1)
+                }
+                return
+            }
+
+            // Map
+            if (o is Map<*, *>) {
+                o.entries.forEach { (k, v) ->
+                    if (out.size >= maxFields) return
+                    val kk = runCatching { k.toString() }.getOrNull() ?: "<key>"
+                    val key = if (prefix.isEmpty()) kk else "$prefix.$kk"
+                    walk(v, key, depth + 1)
+                }
+                return
+            }
+
+            // 普通对象字段
             var c: Class<*>? = o.javaClass
             while (c != null && c != Any::class.java) {
                 for (f in c.declaredFields) {
@@ -287,7 +322,7 @@ object ElemDump {
                     }.getOrNull()
 
                     val key = if (prefix.isEmpty()) f.name else "$prefix.${f.name}"
-                    if (v == null || isLeaf(v)) {
+                    if (v == null || isLeafAny(v)) {
                         out[key] = valueToString(v)
                     } else {
                         walk(v, key, depth + 1)
@@ -297,11 +332,11 @@ object ElemDump {
             }
         }
 
-        walk(obj, "", 0)
+        walk(root, "", 0)
         return out
     }
 
-    private fun isLeaf(v: Any): Boolean {
+    private fun isLeafAny(v: Any): Boolean {
         return v is String ||
             v is Number ||
             v is Boolean ||
@@ -318,7 +353,7 @@ object ElemDump {
             val v = map[k] ?: map.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
             if (!v.isNullOrBlank() && v != "null") return v
         }
-        // 再按“包含”兜底（更宽松）
+        // 再按“包含”兜底
         val lower = map.entries.associate { it.key.lowercase() to it.value }
         for (k in keys) {
             val kk = k.lowercase()
