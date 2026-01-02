@@ -21,50 +21,33 @@ class MenuBuilderHook : ApiHookItem() {
         StickerPanelEntry(),
         QQMessageTracker(),
         QQMessageFetcher(),
-        PatPatMenuEntry(), // ✅ 建议放中间，方便排查
         ModifyTextMessage(),
         RespondFace(),
         MessageEncryptor(),
         FakeFileRecall(),
+
+        // 拍一拍菜单入口（新增）
+        PatPatMenuEntry(),
     )
 
     override fun entry(classLoader: ClassLoader) {
-        val baseClass = classLoader.loadClass(
-            "com.tencent.mobileqq.aio.msglist.holder.component.BaseContentComponent"
-        )
+        val baseClass = classLoader.loadClass("com.tencent.mobileqq.aio.msglist.holder.component.BaseContentComponent")
 
-        // 找到 “拿消息对象”的方法
-        val aioMsgItemClz = classLoader.loadClass("com.tencent.mobileqq.aio.msg.AIOMsgItem")
-        val getMsgMethodName = baseClass.declaredMethods.firstOrNull {
-            it.returnType == aioMsgItemClz && it.parameterTypes.isEmpty()
-        }?.name ?: run {
-            Logger.e("MenuBuilderHook: cannot find getMsg method")
-            return
-        }
+        val getMsgMethodName = baseClass.declaredMethods.first {
+            it.returnType == classLoader.loadClass("com.tencent.mobileqq.aio.msg.AIOMsgItem") && it.parameterTypes.isEmpty()
+        }.name
 
-        // 找到 “构建菜单列表”的方法（更稳：返回类型 assignable to java.util.List）
-        val getListMethodName = baseClass.declaredMethods.firstOrNull {
-            Modifier.isAbstract(it.modifiers) &&
-                java.util.List::class.java.isAssignableFrom(it.returnType) &&
-                it.parameterTypes.isEmpty()
-        }?.name ?: run {
-            Logger.e("MenuBuilderHook: cannot find getMenuList method")
-            return
-        }
+        val getListMethodName = baseClass.declaredMethods.first {
+            Modifier.isAbstract(it.modifiers) && it.returnType == MutableList::class.java && it.parameterTypes.isEmpty()
+        }.name
 
-        val targets = decorators.flatMap { it.targetTypes.asIterable() }.toMutableSet()
-        Logger.d("MenuBuilderHook: targets size=${targets.size} getList=$getListMethodName getMsg=$getMsgMethodName")
-
-        for (target in targets) {
+        for (target in decorators.flatMap { it.targetTypes.asIterable() }.toMutableSet()) {
             try {
-                val clz = classLoader.loadClass(target)
-                val m = clz.getDeclaredMethod(getListMethodName)
-
-                hookAfter(m) { param ->
+                hookAfter(classLoader.loadClass(target).getDeclaredMethod(getListMethodName)) { param ->
                     val getMsgMethod = baseClass.getDeclaredMethod(getMsgMethodName).apply { isAccessible = true }
-                    val aioMsgItem = runCatching { getMsgMethod.invoke(param.thisObject) }.getOrNull() ?: return@hookAfter
+                    val aioMsgItem = getMsgMethod.invoke(param.thisObject) ?: return@hookAfter
 
-                    Logger.d("MenuBuilderHook target=$target msg=$aioMsgItem result=${param.result?.javaClass?.name}")
+                    Logger.d("MenuBuilderHook target=$target msg=$aioMsgItem")
 
                     for (decorator in decorators) {
                         if (target in decorator.targetTypes) {
@@ -74,9 +57,7 @@ class MenuBuilderHook : ApiHookItem() {
                     }
                 }
             } catch (_: NoSuchMethodException) {
-                // 目标类没这个方法，跳过
             } catch (_: ClassNotFoundException) {
-                // 某些版本没这个 component，跳过
             } catch (t: Throwable) {
                 Logger.e("MenuBuilderHook hook target fail: $target", t)
             }
@@ -136,6 +117,7 @@ interface OnMenuBuilder {
             "com.tencent.mobileqq.aio.qwallet.AIOQWalletComponent",
             "com.tencent.mobileqq.aio.shop.AIOShopArkContentComponent",
             "com.tencent.qqnt.aio.sample.BusinessSampleContentComponent",
+            "com.tencent.mobileqq.aio.msglist.holder.component.template.AIOTemplateMsgComponent"
         )
 
     fun onGetMenu(
