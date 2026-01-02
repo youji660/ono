@@ -4,7 +4,6 @@ import android.view.View
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedHelpers
 import moe.ono.creator.JsonViewerDialog
-import moe.ono.hooks.base.api.QQMsgRespHandler
 import moe.ono.hooks.base.util.Toasts
 import moe.ono.hooks.dispatcher.OnMenuBuilder
 import moe.ono.ui.CommonContextWrapper
@@ -14,12 +13,6 @@ import moe.ono.util.SyncUtils
 import org.json.JSONObject
 import java.lang.reflect.Proxy
 
-/**
- * 在消息长按菜单里增加：
- *  - “查看拍一拍缓存”
- *
- * 依赖：QQMsgRespHandler.PatPatCache
- */
 class PatPatMenuEntry : OnMenuBuilder {
 
     override val targetTypes: Array<String>
@@ -29,7 +22,7 @@ class PatPatMenuEntry : OnMenuBuilder {
         val menuList = (param.result as? MutableList<Any>) ?: return
         if (menuList.isEmpty()) return
 
-        // 避免重复添加
+        // 避免重复
         if (menuList.any { safeGetTitle(it)?.contains("拍一拍") == true }) return
 
         val ctxAct = ContextUtils.getCurrentActivity() ?: return
@@ -44,10 +37,10 @@ class PatPatMenuEntry : OnMenuBuilder {
         runCatching { setTitle(newItem, "查看拍一拍缓存") }
             .onFailure { Logger.e("[PatPatMenuEntry] setTitle fail", it) }
 
-        runCatching { setId(newItem, 0x6F504154 /* oPAT */) }.onFailure { /* ignore */ }
+        runCatching { setId(newItem, 0x6F504154 /* oPAT */) }.onFailure { }
 
         val click = {
-            val cache = QQMsgRespHandler.PatPatCache
+            val cache = moe.ono.hooks.base.api.QQMsgRespHandler.PatPatCache
             val json: JSONObject? = cache.lastJson
             val text: String? = cache.lastText
 
@@ -57,9 +50,7 @@ class PatPatMenuEntry : OnMenuBuilder {
                         CommonContextWrapper.createAppCompatContext(ctxAct),
                         json
                     )
-                    if (!text.isNullOrBlank()) {
-                        Toasts.success(ctxAct, text)
-                    }
+                    if (!text.isNullOrBlank()) Toasts.success(ctxAct, text)
                 } else {
                     Toasts.error(ctxAct, "暂无拍一拍缓存（先触发一次拍一拍）")
                 }
@@ -73,10 +64,6 @@ class PatPatMenuEntry : OnMenuBuilder {
 
         menuList.add(newItem)
     }
-
-    // -------------------------
-    // 反射适配层
-    // -------------------------
 
     private fun createMenuItemLike(itemClz: Class<*>, template: Any): Any {
         itemClz.declaredConstructors.forEach { c ->
@@ -161,7 +148,6 @@ class PatPatMenuEntry : OnMenuBuilder {
     }
 
     private fun bindClick(item: Any, click: () -> Unit): Boolean {
-        // 1) setOnClickListener(View.OnClickListener)
         item.javaClass.methods.firstOrNull {
             it.name.contains("setOnClick", true) &&
                 it.parameterTypes.size == 1 &&
@@ -172,7 +158,6 @@ class PatPatMenuEntry : OnMenuBuilder {
             return true
         }
 
-        // 2) 字段里有 OnClickListener
         item.javaClass.declaredFields.firstOrNull {
             View.OnClickListener::class.java.isAssignableFrom(it.type)
         }?.let { f ->
@@ -181,7 +166,6 @@ class PatPatMenuEntry : OnMenuBuilder {
             return true
         }
 
-        // 3) 接口回调代理兜底
         val cbField = item.javaClass.declaredFields.firstOrNull {
             it.name.contains("callback", true) || it.name.contains("action", true) || it.name.contains("onClick", true)
         } ?: return false
