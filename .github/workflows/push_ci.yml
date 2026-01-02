@@ -49,45 +49,27 @@ jobs:
         run: chmod +x gradlew
 
       # =====================================================
-      # 手动运行(workflow_dispatch)：只打一份 Debug APK
+      # 需要签名的场景：push(main) / 手动(workflow_dispatch)
+      # PR 不注入签名
       # =====================================================
-      - name: Build debug APK (manual)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Decode keystore (main/manual)
+        if: github.event_name != 'pull_request'
         run: |
           set -euxo pipefail
-          ./gradlew :app:assembleDebug \
-            --no-daemon \
-            --console=plain \
-            --info \
-            --stacktrace \
-            --warning-mode all \
-            2>&1 | tee gradle.log
-
-      - name: Upload debug APK (manual)
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ono-debug-apk
-          path: app/build/outputs/apk/debug/**/*.apk
-          if-no-files-found: error
-
-      # =====================================================
-      # Release 流程（push / PR）
-      # =====================================================
-
-      - name: Decode keystore (push -> main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
           mkdir -p app
-          echo "$KEYSTORE_B64" | base64 -d > app/ono.jks
+          echo "${KEYSTORE_B64}" | base64 -d > app/ono.jks
+          ls -lah app/ono.jks
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
 
-      - name: Build unsigned Release for PR
+      # =====================================================
+      # PR：构建 Release（不签名/用项目 fallback）
+      # =====================================================
+      - name: Build Release for PR (unsigned)
         if: github.event_name == 'pull_request'
         run: |
           set -euxo pipefail
-          ./gradlew assembleRelease \
+          ./gradlew :app:assembleRelease \
             --no-daemon \
             --console=plain \
             --info \
@@ -95,23 +77,7 @@ jobs:
             --warning-mode all \
             2>&1 | tee gradle.log
 
-      - name: Build signed Release for main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          set -euxo pipefail
-          ./gradlew assembleRelease \
-            -PKEYSTORE_FILE=ono.jks \
-            -PKEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} \
-            -PKEY_ALIAS=key0 \
-            -PKEY_PASSWORD=${{ secrets.KEY_PASSWORD }} \
-            --no-daemon \
-            --console=plain \
-            --info \
-            --stacktrace \
-            --warning-mode all \
-            2>&1 | tee gradle.log
-
-      - name: Upload PR APK (unsigned)
+      - name: Upload PR APK (release)
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
@@ -119,8 +85,27 @@ jobs:
           path: app/build/outputs/apk/release/**/*.apk
           if-no-files-found: error
 
+      # =====================================================
+      # main / 手动：构建签名 Release
+      # =====================================================
+      - name: Build signed Release (main/manual)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euxo pipefail
+          ./gradlew :app:assembleRelease \
+            -PKEYSTORE_FILE=app/ono.jks \
+            -PKEYSTORE_PASSWORD='${{ secrets.KEYSTORE_PASSWORD }}' \
+            -PKEY_ALIAS='${{ secrets.KEY_ALIAS }}' \
+            -PKEY_PASSWORD='${{ secrets.KEY_PASSWORD }}' \
+            --no-daemon \
+            --console=plain \
+            --info \
+            --stacktrace \
+            --warning-mode all \
+            2>&1 | tee gradle.log
+
       - name: Upload Release APK (signed)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: ono-release-apk
