@@ -83,10 +83,10 @@ jobs:
         run: |
           set -euxo pipefail
           ./gradlew :app:assembleRelease \
-            -PKEYSTORE_FILE=app/ono.jks \
-            -PKEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} \
-            -PKEY_ALIAS=${{ secrets.KEY_ALIAS }} \
-            -PKEY_PASSWORD=${{ secrets.KEY_PASSWORD }} \
+            -PKEYSTORE_FILE=ono.jks \
+            -PKEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}" \
+            -PKEY_ALIAS="${{ secrets.KEY_ALIAS }}" \
+            -PKEY_PASSWORD="${{ secrets.KEY_PASSWORD }}" \
             --no-daemon --console=plain --info --stacktrace --warning-mode all \
             2>&1 | tee gradle.log
 
