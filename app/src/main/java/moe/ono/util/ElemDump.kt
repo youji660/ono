@@ -1,53 +1,188 @@
 package moe.ono.util
 
 import com.tencent.qqnt.kernel.nativeinterface.MsgRecord
+import java.lang.reflect.Method
+import java.util.IdentityHashMap
 
 object ElemDump {
 
     @Volatile
-    var enabled = true   // 不想刷屏就关掉
+    var enabled = true
+
+    /** 仅输出拍一拍解析结果；想看全量 element dump 再打开 */
+    @Volatile
+    var dumpAllElements = false
+
+    data class PatInfo(
+        val elemClass: String,
+        val text: String?,
+        val fromUin: String?,
+        val toUin: String?,
+        val hitReason: String,
+        val extra: Map<String, String>
+    )
 
     fun logMsgRecordElements(msgRecord: MsgRecord) {
         if (!enabled) return
 
-        Logger.i("========== [ElemDump] START ==========")
-        Logger.i("MsgRecord class = ${msgRecord.javaClass.name}")
-
-        // 1️⃣ dump 所有 method（返回 java.util.List）
-        for (m in msgRecord.javaClass.declaredMethods) {
-            if (m.parameterTypes.isNotEmpty()) continue
-            if (!java.util.List::class.java.isAssignableFrom(m.returnType)) continue
-
-            try {
-                m.isAccessible = true
-                val ret = m.invoke(msgRecord)
-                if (ret is java.util.List<*>) {
-                    Logger.i(">> METHOD ${m.name}() -> List(size=${ret.size})")
-                    dumpList(ret)
-                }
-            } catch (_: Throwable) {}
+        val elements = getElements(msgRecord)
+        if (elements == null) {
+            Logger.w("[ElemDump] cannot locate element list from MsgRecord: ${msgRecord.javaClass.name}")
+            return
         }
 
-        // 2️⃣ dump 所有 field（java.util.List）
+        if (dumpAllElements) {
+            Logger.i("========== [ElemDump] START ==========")
+            Logger.i("MsgRecord class = ${msgRecord.javaClass.name}")
+            Logger.i("ElemDump: elements size = ${elements.size}")
+            dumpList(elements)
+            Logger.i("========== [ElemDump] END ==========")
+        }
+
+        val pat = findPatInfo(elements)
+        if (pat != null) {
+            Logger.i("========== [ElemDump] PAT DETECTED ==========")
+            Logger.i("PatInfo:")
+            Logger.i("  elemClass = ${pat.elemClass}")
+            Logger.i("  text      = ${pat.text}")
+            Logger.i("  fromUin    = ${pat.fromUin}")
+            Logger.i("  toUin      = ${pat.toUin}")
+            Logger.i("  reason    = ${pat.hitReason}")
+            if (pat.extra.isNotEmpty()) {
+                pat.extra.forEach { (k, v) -> Logger.i("  $k = $v") }
+            }
+            Logger.i("========== [ElemDump] PAT END ==========")
+        }
+    }
+
+    /**
+     * 从 MsgRecord 里取 elements List：
+     * 1) 优先找无参返回 List 且名字含 elem/element 的方法
+     * 2) 其次找无参返回 List 的方法
+     * 3) 最后扫字段 List
+     */
+    private fun getElements(msgRecord: MsgRecord): List<Any?>? {
+        val methods = msgRecord.javaClass.declaredMethods
+            .filter { it.parameterTypes.isEmpty() && java.util.List::class.java.isAssignableFrom(it.returnType) }
+
+        // 1) method name 优先级：element/elem > list
+        val sorted = methods.sortedWith(compareByDescending<Method> { m ->
+            val n = m.name.lowercase()
+            when {
+                "element" in n || "elem" in n -> 100
+                "list" in n -> 50
+                else -> 0
+            }
+        }.thenBy { it.name })
+
+        for (m in sorted) {
+            val list = runCatching {
+                m.isAccessible = true
+                m.invoke(msgRecord) as? List<*>
+            }.getOrNull()
+
+            if (list != null) return list as List<Any?>
+        }
+
+        // fields fallback
         var c: Class<*>? = msgRecord.javaClass
         while (c != null && c != Any::class.java) {
             for (f in c.declaredFields) {
-                try {
+                val list = runCatching {
                     f.isAccessible = true
-                    val v = f.get(msgRecord)
-                    if (v is java.util.List<*>) {
-                        Logger.i(">> FIELD ${f.name} -> List(size=${v.size})")
-                        dumpList(v)
-                    }
-                } catch (_: Throwable) {}
+                    f.get(msgRecord) as? List<*>
+                }.getOrNull()
+                if (list != null) return list as List<Any?>
             }
             c = c.superclass
         }
-
-        Logger.i("========== [ElemDump] END ==========")
+        return null
     }
 
-    private fun dumpList(list: java.util.List<*>) {
+    /**
+     * 找拍一拍/戳一戳 element，并解析：
+     * - hit：类名/文案/字段特征（type/action/op/target）
+     * - from/to：优先字段直接命中；不行就递归找 uin
+     */
+    private fun findPatInfo(elements: List<Any?>): PatInfo? {
+        for (e in elements) {
+            if (e == null) continue
+            val clsName = e.javaClass.name
+            val s = runCatching { e.toString() }.getOrNull().orEmpty()
+
+            // 先把字段拍平（含浅递归）
+            val flat = flattenObject(e, maxDepth = 2, maxFields = 200)
+
+            // 识别：类名 / toString / 关键字段
+            val reason = hitReason(clsName, s, flat) ?: continue
+
+            val text = pickFirst(flat,
+                "text", "content", "brief", "desc", "wording", "tip",
+                "msg", "summary", "display", "show", "hint"
+            )?.takeIf { it.isNotBlank() && it != "null" } ?: s.takeIf { it.isNotBlank() }
+
+            // from / to：字段直接命中
+            var from = pickFirst(flat, "fromuin", "senderuin", "srcuin", "operatoruin", "actionuin", "opuin", "uin")
+            var to   = pickFirst(flat, "touin", "targetuin", "dstuin", "receiveruin", "peeruin", "dstUin")
+
+            // 再补一刀：如果字段没取到，尝试在“operator/target”对象里找
+            if (from.isNullOrBlank() || from == "null") {
+                from = pickFirst(flat,
+                    "operator.uin", "operatoruin.uin", "op.uin", "opuin.uin",
+                    "sender.uin", "from.uin"
+                )
+            }
+            if (to.isNullOrBlank() || to == "null") {
+                to = pickFirst(flat,
+                    "target.uin", "targetuin.uin", "peer.uin", "to.uin", "dst.uin"
+                )
+            }
+
+            // extra：只保留关键字段，避免刷屏
+            val keep = LinkedHashMap<String, String>()
+            for ((k, v) in flat) {
+                val kk = k.lowercase()
+                if (
+                    kk.contains("uin") ||
+                    kk.contains("text") || kk.contains("content") || kk.contains("word") || kk.contains("desc") || kk.contains("tip") ||
+                    kk.contains("type") || kk.contains("action") || kk.contains("op") || kk.contains("target") ||
+                    kk.contains("id") || kk.contains("time")
+                ) {
+                    keep[k] = v
+                }
+            }
+
+            return PatInfo(
+                elemClass = clsName,
+                text = text,
+                fromUin = from,
+                toUin = to,
+                hitReason = reason,
+                extra = keep
+            )
+        }
+        return null
+    }
+
+    private fun hitReason(clsName: String, toStr: String, flat: Map<String, String>): String? {
+        val c = clsName.lowercase()
+        val t = toStr
+
+        if (c.contains("poke") || c.contains("pat") || c.contains("nudge")) return "className($clsName)"
+        if (t.contains("拍了拍") || t.contains("戳了戳") || t.contains("拍一拍")) return "toString($toStr)"
+
+        // 字段特征：出现 action/type 且 文案相关字段里有 pat/poke/拍/戳
+        val anyAction = flat.keys.any { it.lowercase().contains("action") || it.lowercase().contains("type") }
+        val anyPatWord = flat.values.any { v ->
+            v.contains("拍了拍") || v.contains("戳了戳") || v.contains("拍一拍") ||
+            v.contains("pat", true) || v.contains("poke", true) || v.contains("nudge", true)
+        }
+        if (anyAction && anyPatWord) return "fields(action/type + patWord)"
+
+        return null
+    }
+
+    private fun dumpList(list: List<Any?>) {
         list.forEachIndexed { index, elem ->
             if (elem == null) return@forEachIndexed
             Logger.i("  [$index] ${elem.javaClass.name}")
@@ -59,18 +194,103 @@ object ElemDump {
         var c: Class<*>? = obj.javaClass
         while (c != null && c != Any::class.java) {
             for (f in c.declaredFields) {
-                try {
+                runCatching {
                     f.isAccessible = true
                     val v = f.get(obj)
                     Logger.i("      field ${f.name} = ${valueToString(v)}")
-                } catch (_: Throwable) {}
+                }
             }
             c = c.superclass
         }
+        runCatching { Logger.i("      toString = $obj") }
+    }
 
-        try {
-            Logger.i("      toString = $obj")
-        } catch (_: Throwable) {}
+    /**
+     * 把对象字段拍平到 map：
+     * - key 支持 path：operator.uin 这种
+     * - 深度限制防死循环
+     * - IdentityHashMap 防循环引用
+     */
+    private fun flattenObject(
+        obj: Any,
+        maxDepth: Int,
+        maxFields: Int
+    ): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        val seen = IdentityHashMap<Any, Boolean>()
+
+        fun walk(o: Any?, prefix: String, depth: Int) {
+            if (o == null) {
+                if (prefix.isNotEmpty()) out[prefix] = "null"
+                return
+            }
+            if (out.size >= maxFields) return
+
+            // 基础类型直接写
+            if (isLeaf(o)) {
+                if (prefix.isNotEmpty()) out[prefix] = valueToString(o)
+                return
+            }
+
+            if (depth > maxDepth) {
+                if (prefix.isNotEmpty()) out[prefix] = valueToString(o)
+                return
+            }
+
+            // 循环引用保护
+            if (seen.containsKey(o)) return
+            seen[o] = true
+
+            var c: Class<*>? = o.javaClass
+            while (c != null && c != Any::class.java) {
+                for (f in c.declaredFields) {
+                    if (out.size >= maxFields) return
+                    val v = runCatching {
+                        f.isAccessible = true
+                        f.get(o)
+                    }.getOrNull()
+
+                    val key = if (prefix.isEmpty()) f.name else "$prefix.${f.name}"
+                    if (v == null || isLeaf(v)) {
+                        out[key] = valueToString(v)
+                    } else {
+                        // 继续下钻
+                        walk(v, key, depth + 1)
+                    }
+                }
+                c = c.superclass
+            }
+        }
+
+        walk(obj, "", 0)
+        return out
+    }
+
+    private fun isLeaf(v: Any): Boolean {
+        return v is String ||
+            v is Number ||
+            v is Boolean ||
+            v is Char ||
+            v is ByteArray || v is IntArray || v is LongArray ||
+            v.javaClass.isEnum ||
+            v.javaClass.name.startsWith("java.") ||
+            v.javaClass.name.startsWith("kotlin.")
+    }
+
+    private fun pickFirst(map: Map<String, String>, vararg keys: String): String? {
+        // 直接 key 命中（支持 path）
+        for (k in keys) {
+            val v = map[k] ?: map.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
+            if (!v.isNullOrBlank() && v != "null") return v
+        }
+        // 再按“包含”兜底（更宽松）
+        val lower = map.entries.associate { it.key.lowercase() to it.value }
+        for (k in keys) {
+            val kk = k.lowercase()
+            val hit = lower.entries.firstOrNull { (key, _) -> key.endsWith(kk) || key.contains(kk) }?.value
+            if (!hit.isNullOrBlank() && hit != "null") return hit
+        }
+        return null
     }
 
     private fun valueToString(v: Any?): String =
@@ -79,6 +299,6 @@ object ElemDump {
             is ByteArray -> "byte[${v.size}]"
             is IntArray -> "int[${v.size}]"
             is LongArray -> "long[${v.size}]"
-            else -> v.toString()
+            else -> runCatching { v.toString() }.getOrElse { "<toString error>" }
         }
 }
